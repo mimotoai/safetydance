@@ -1,3 +1,3 @@
-from safetydance import step_data
+from safetydance import ContextProperty
 
-deep_step_data = step_data(str)
+deep_step_data = ContextProperty[str](description="Step data from a deep import")

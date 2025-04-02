@@ -1,302 +1,263 @@
-from ast import (
-    Assign,
-    Attribute,
-    Call,
-    copy_location,
-    fix_missing_locations,
-    Index,
-    Load,
-    Module,
-    Name,
-    NodeTransformer,
-    parse,
-    Store,
-    Subscript,
-)
-from dataclasses import dataclass
-from importlib import import_module
-from inspect import currentframe, getclosurevars, getmodule, stack
-from types import ModuleType
-from typing import Any, Callable, Dict, Type, TypeVar, Generic
-from .extensions import enter_step, exit_step, STEPBODY_EXTENSION_REGISTRY
-from .file_util import code_to_ast
-from .jupyter import is_jupyter
-import functools
-import inspect
-
-
-def step_decorator(f):
-    f.is_step_decorator = True
-    return f
+import logging
+import threading
+from functools import wraps
+from inspect import currentframe
+from logging import Logger
+from types import FrameType
+from typing import Any, Callable, Dict, Generic, TypeVar
 
 
 T = TypeVar("T")
 
 
-@dataclass(frozen=True)
-class ContextKey(Generic[T]):
-    datatype: T
+class ContextProperty(Generic[T]):
+    name: str
     description: str
     initializer: Callable[["Context"], T]
+    declaring_cls: type
 
+    def __init__(
+        self,
+        name: str | None = None,
+        description: str | None = None,
+        initializer: Callable[["Context"], T] | None = None,
+        declaring_cls: type | None = None,
+    ):
+        self.name = name
+        self.description = description
+        self.initializer = initializer
+        self.declaring_cls = declaring_cls
 
-def step_data(
-    key_type: Type,
-    description: str = None,
-    initializer: Callable[["Context"], Type] = None,
-):
-    return ContextKey(key_type, description, initializer)
-
-
-class Context(Dict[ContextKey, Any]):
-    def __getitem__(self, key: ContextKey):
-        """
-        A ``Context`` differs from a plain ``Dict`` in that it will initialize a key
-        with a default value if the key defines a default value initializer.
-        """
-        if key not in self and key.initializer is not None:
-            initial_value = key.initializer(self)
-            self[key] = initial_value
-        return super().__getitem__(key)
-
-
-class NestingContext(Context):
-    def __init__(self, *args, parent: Context = None, **kwargs):
-        super().__init__(self, *args, **kwargs)
-        self.parent = parent
-
-    def __missing__(self, key):
-        if self.parent is not None:
-            return self.parent[key]
-        raise KeyError(key)
-
-
-def get_context():
-    calling_frame = currentframe().f_back
-    parent_frame = calling_frame.f_back
-    context = parent_frame.f_locals.get('context', None)
-    return context
-
-
-class Step:
-    def __init__(self, f: Callable, step_rewriter):
-        self.f_original = f
-        self.f = None
-        self.step_rewriter = step_rewriter
-
-    def __call__(self, *args, **kwargs):
-        __tracebackhide__ = True
-        if self.f is None:
-            self.rewrite()
+    @property
+    def value(self) -> T:
         context = get_context()
-        enter_step(context, self)
-        ret = self.f(*args, **kwargs)
-        exit_step(context, self)
-        return ret
-
-    def rewrite(self):
-        if hasattr(self.f_original, "__rewritten_step__") and not is_jupyter():
-            self.f = self.f_original.__rewritten_step__
-            return
-        in_tree = code_to_ast(self.f_original)
-        filename, lineno = code_to_ast.get_file_info(self.f_original)
-        out_tree = self.step_rewriter(self.f_original).visit(in_tree)
-        new_func_name = self.f_original.__name__
-        func_scope = self.f_original.__globals__
-        for key, value in (
-            ("Context", Context),
-            ("safetydance", __import__(__name__)),
-        ):
-            if key not in self.f_original.__globals__:
-                self.f_original.__globals__[key] = value
-        # Compile the new function in the old function's scope. If we don't change the
-        # name, this actually overrides the old function with the new one
-        if not isinstance(out_tree, Module):
-            # As of python 3.8.0 the signature for Module has changed, this fix should
-            # work for < 3.8 as well as 3.8
-            # print(f'dumping module { dump_tree(out_tree) } ')
-            # out_tree = Module(body=[out_tree])
-            module = parse("")
-            module.body = [out_tree]
-            out_tree = module
-        exec(compile(out_tree, f"{filename}", "exec"), func_scope)
-        self.f = func_scope[new_func_name]
-        self.f.IsStep = True
-        setattr(self.f_original, "__rewritten_step__", self.f)
-        # make sure that the function hasn't been overwritten due to the reparsing of
-        # the source file. This is necessary to support extensions.
-        m = import_module(self.__module__)
-        setattr(m, self.__name__, self)
-
-
-class StepRewriter(NodeTransformer):
-    def __init__(self, f: Callable):
-        super().__init__()
-        self.f = f
-        self.step_body_rewriter = StepBodyRewriter(f)
-        self.modulevars = vars(getmodule(f))
-
-    def is_step_decorator(self, decorator):
-        if not hasattr(decorator, "id"):
-            return False
-        decorator = self.f.__globals__.get(decorator.id)
-        return hasattr(decorator, "is_step_decorator")
-
-    def visit_FunctionDef(self, node):
-        self.generic_visit(node)
-        node.decorator_list = [
-            decorator
-            for decorator in node.decorator_list
-            if not self.is_step_decorator(decorator)
-        ]
-        newbody = [
-            # context = safetydance.get_context()
-            Assign(
-                targets=[
-                    Name(id='context', ctx=Store()),
-                ],
-                value=Call(
-                    func=Attribute(value=Name(id='safetydance', ctx=Load()), attr='get_context', ctx=Load()),
-                    args=[],
-                    keywords=[],
-                ),
-                type_comment=None,
-            ),
-        ]
-        for n in node.body:
-            n = self.step_body_rewriter.visit(n)
-            try:
-                newbody.extend(iter(n))
-            except TypeError:
-                newbody.append(n)
-        node.body = newbody
-        return fix_missing_locations(node)
-
-
-@step_decorator
-def step(f, step_rewriter=StepRewriter, step_class=Step):
-    """
-    Rewrite the step function so:
-    1. `context: Context` is the first parameter
-    2. All references to ContextKey instances are rewritten as
-       `context[key]`
-    """
-    return functools.wraps(f)(step_class(f, step_rewriter=step_rewriter))
-
-
-class Script(Step):
-    def __call__(self, *args, **kwargs):
-        __tracebackhide__ = True
-        if self.f is None:
-            self.rewrite()
-        parent_context = get_context()
-        context = NestingContext(parent=parent_context) 
-        enter_step(context, self)
-        ret = self.f(*args, **kwargs)
-        exit_step(context, self)
-        return ret
-
-
-class StepBodyRewriter(NodeTransformer):
-    def __init__(self, f: Callable):
-        super().__init__()
-        self.f = f
-        self.closurevars = getclosurevars(f)
-        self.modulevars = vars(getmodule(f))
-        self.step_globals = f.__globals__
-
-    def resolve(self, id: str):
-        if id in self.closurevars.nonlocals:
-            return self.closurevars.nonlocals.get(id)
-        if id in self.closurevars.globals:
-            return self.closurevars.globals.get(id)
-        if id in self.closurevars.unbound:
-            return None
-
-    def visit(self, node):
-        node = super().visit(node)
-        for transformer in STEPBODY_EXTENSION_REGISTRY:
-            node = transformer.visit(node)
-        return node
-
-    def visit_Name(self, node):
-        """
-        If the name resolves to a ContextKey, rewrite it as a subscript
-        of the `context`.
-        """
-        sig = inspect.signature(self.f)
-        resolved = self.step_globals.get(node.id, None)
-
-        if resolved is not None and isinstance(resolved, ContextKey):
-            if node.id in sig.parameters:
-                return node
-            else:
-                return fix_missing_locations(
-                    copy_location(
-                        Subscript(
-                            value=Name(id="context", ctx=Load()),
-                            slice=Index(value=Name(id=node.id, ctx=Load())),
-                            ctx=node.ctx,
-                        ),
-                        node,
-                    )
-                )
+        value = context.get(self, None)
+        found = False
+        if value is None and self.name:
+            value = context.get(self.name, None)
+            found = self.name in context
         else:
-            return node
+            value = context.get(self, None)
+            found = self in context
+        if not found and self.initializer is not None:
+            value = self.initializer(context)
+            context[self.name or self] = value
+            context._trace(self, "initialized", currentframe().f_back)
+            found = True
+        context._trace(self, "retrieved", currentframe().f_back)
+        if not found:
+            raise KeyError(f"ContextData {self} not found in Context")
+        return value
 
-    def rewrite_as_context_lookup(self, node):
-        ctx = node.ctx
-        node.ctx = Load()
-        return fix_missing_locations(
-            copy_location(
-                Subscript(
-                    value=Name(id="context", ctx=Load()),
-                    slice=Index(value=node),
-                    ctx=ctx,
-                ),
-                node,
-            )
+    @value.setter
+    def value(self, new_value: T):
+        context = get_context()
+        context._trace(self, "set", currentframe().f_back)
+        context[self.name or self] = new_value
+
+    def __repr__(self) -> str:
+        if self.name and self.declaring_cls:
+            return f"{self.name} of {self.declaring_cls}"
+        else:
+            return super().__repr__()
+
+    @property
+    def is_set(self):
+        context = get_context()
+        return (
+            (self.name and self.name in context)
+            or self in context
+            or self.initializer is not None
         )
 
-    def visit_Attribute(self, node):
-        if isinstance(node.value, Attribute):
-            node, resolved = self.recurse_Attribute(node)
-            return node
-        node.value = self.visit(node.value)
-        return node
 
-    def resolve_Attribute_attr(self, node, resolved):
-        attr_value = getattr(resolved, node.attr)
-        if isinstance(attr_value, ContextKey):
-            node = self.rewrite_as_context_lookup(node)
-            return (node, None)
-        elif isinstance(attr_value, ModuleType) or isinstance(attr_value, type):
-            return (node, attr_value)
-        return (node, None)
+class Context(Dict[ContextProperty | str, Any]):
+    def __init__(
+        self,
+        *args,
+        tracing: bool = False,
+        tracing_logger: Logger | None = None,
+        tracing_log_level: int = logging.INFO,
+        **kwargs,
+    ):
+        self.tracing = tracing
+        self.tracing_logger = tracing_logger or logging.getLogger()
+        self.tracing_log_level = tracing_log_level
+        self.parent = None
+        super().__init__(*args, **kwargs)
 
-    def recurse_Attribute(self, node):
-        if isinstance(node.value, Name):
-            resolved = self.step_globals.get(node.value.id, None)
-            if resolved is not None:
-                if isinstance(resolved, ContextKey):
-                    node.value = self.visit_Name(node.value)
-                    return (node, None)
-                elif isinstance(resolved, ModuleType) or isinstance(resolved, type):
-                    return self.resolve_Attribute_attr(node, resolved)
-        elif isinstance(node.value, Attribute):
-            result_value_node, resolved_value = self.recurse_Attribute(node.value)
-            if resolved_value is not None:
-                return self.resolve_Attribute_attr(node, resolved_value)
-            else:
-                node.value = result_value_node
-                return (node, None)
-        return (node, None)
+    def __getitem__(self, key):
+        if self.parent:
+            return self.parent.__getitem__(key)
+        return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        if self.parent:
+            return self.parent.__setitem__(key)
+        return super().__setitem__(key, value)
+
+    def __enter__(self) -> "Context":
+        global THREAD_LOCALS
+        if hasattr(THREAD_LOCALS, "context"):
+            self.parent = THREAD_LOCALS.context
+        THREAD_LOCALS.context = self
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        global THREAD_LOCALS
+        THREAD_LOCALS.context = self.parent
+
+    def _trace(self, context_data: ContextProperty, op: str, frame: FrameType):
+        if self.tracing:
+            filename = frame.f_code.co_filename
+            lineno = frame.f_lineno
+            self.tracing_logger.log(
+                self.tracing_log_level,
+                f"ContextData {context_data.name} from {context_data.declaring_cls} {op} by {filename}:{lineno}",
+            )
+        if self.parent:
+            self.parent._trace(context_data, op, frame)
 
 
-@step_decorator
-def script(f, script_rewriter=StepRewriter, script_class=Script):
+THREAD_LOCALS = threading.local()
+
+
+def get_context() -> Context:
     """
-    Rewrite the function as a Script
-    remember Signature.replace
+    Automatically retrieve and optionally create the context for use with step
+    functions.
     """
-    return functools.wraps(f)(script_class(f, step_rewriter=script_rewriter))
+    global THREAD_LOCALS
+    if not hasattr(THREAD_LOCALS, "context") or THREAD_LOCALS.context is None:
+        raise Exception("No context set! Did you forget to use the @context decorator?")
+    return THREAD_LOCALS.context
+
+
+def context(
+    func: Callable | None = None,
+    tracing_log_level: int | None = None,
+    tracing_logger: Logger | None = None,
+):
+    tracing = tracing_log_level is not None or tracing_logger is not None
+
+    if func:
+
+        @wraps(func)
+        def direct_wrapper(*args, **kwargs):
+            with Context(
+                tracing=tracing,
+                tracing_logger=tracing_logger,
+                tracing_log_level=tracing_log_level,
+            ):
+                return func(*args, **kwargs)
+
+        return direct_wrapper
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with Context(
+                tracing=tracing,
+                tracing_logger=tracing_logger,
+                tracing_log_level=tracing_log_level,
+            ):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+script = context
+
+
+def test_context(
+    func: Callable | None = None,
+    tracing_log_level: int | None = None,
+    tracing_logger: Logger | None = None,
+):
+    """Grab the test fixtures and put them into the Context."""
+    tracing = tracing_log_level is not None or tracing_logger is not None
+
+    if func:
+
+        @wraps(func)
+        def direct_wrapper(*args, **kwargs):
+            with Context(
+                tracing=tracing,
+                tracing_logger=tracing_logger,
+                tracing_log_level=tracing_log_level,
+            ) as context:
+                context.update(kwargs)
+                return func(*args, **kwargs)
+
+        return direct_wrapper
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with Context(
+                tracing=tracing,
+                tracing_logger=tracing_logger,
+                tracing_log_level=tracing_log_level,
+            ) as context:
+                context.update(kwargs)
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+class ContextPropertyDescriptor:
+    def __init__(self, name, context_data):
+        self.name = name
+        self.context_data = context_data
+
+    def __get__(self, instance, owner=None):
+        return self.context_data.value
+
+    def __set__(self, instance, value):
+        self.context_data.value = value
+
+
+class ContextData(type):
+    def __new__(cls, name, bases, namespace):
+        type_hints = namespace["__annotations__"]
+        new_namespace = dict(namespace)
+        for name, type_hint in type_hints.items():
+            initializer = namespace.get(name, None)
+            context_data = ContextProperty[type_hint](name, initializer=initializer)
+            new_namespace[name] = ContextPropertyDescriptor(name, context_data)
+        ret = super().__new__(cls, name, bases, new_namespace)
+        return ret
+
+    def __setattr__(self, name, value):
+        if name in self.__dict__:
+            return self.__dict__[name].__set__(self, value)
+        else:
+            # Fall back to normal attribute setting for attributes not managed by ContextData
+            return super().__setattr__(name, value)
+
+
+def context_data(cls):
+    """
+    Class decorator that sets the metaclass of the decorated class to ContextData.
+    
+    This allows classes to be defined without explicitly specifying the metaclass,
+    making the API more user-friendly.
+    
+    Usage:
+        @context_data
+        class MyData:
+            field1: str
+            field2: int = 42
+    """
+    # Create a new namespace dictionary from the class's __dict__
+    namespace = {}
+    for key, value in cls.__dict__.items():
+        if key != "__dict__" and key != "__weakref__":
+            namespace[key] = value
+    
+    # Create a new class with the same name, bases, and namespace, but with ContextData as metaclass
+    return ContextData(cls.__name__, cls.__bases__, namespace)
