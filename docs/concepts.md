@@ -161,12 +161,13 @@ with ctx:  # make it the active context
     assert total.value == 4.5
 ```
 
-## Subclasses and redeclared fields
+## Classes are final
 
-A subclass that redeclares a field shares the base class's value; only the
-default differs. Until a value is stored, each class reads its own default, so
-the order of reads doesn't matter. Once a value is stored through either class,
-both read it.
+A `context_data` class can't be subclassed: a subclass would leave open which
+class's default a shared field reads, so subclassing one raises `TypeError`.
+Group related fields in separate classes instead. Add `@typing.final` as well if
+you want type checkers to flag a subclass before it runs. A `context_data` class
+can still have ordinary base classes, including `abc.ABC`.
 
 ```{code-cell} python
 @context_data
@@ -174,46 +175,13 @@ class Base:
     level: int = 1
 
 
-@context_data
-class Child(Base):
-    level: int = 2
+try:
 
+    class Child(Base):
+        level: int = 2
 
-@script
-def defaults_then_write():
-    assert (Base.level, Child.level) == (1, 2)  # each class's own default
-    Base.level = 5
-    assert Child.level == 5  # one value, whichever class writes it
-
-
-defaults_then_write()
-```
-
-An `initializer()` default gives each class its own value until one is stored,
-and `del` through either class clears the stored value and both defaults. A
-redeclared field without a default raises until a value is stored, even when the
-base class has one.
-
-```{code-cell} python
-@context_data
-class NoDefaultChild(Base):
-    level: int
-
-
-@script
-def no_default():
-    assert Base.level == 1
-    try:
-        NoDefaultChild.level
-    except ContextDataNotSet:
-        pass
-    else:
-        raise AssertionError("expected ContextDataNotSet")
-    Base.level = 3
-    assert NoDefaultChild.level == 3
-
-
-no_default()
+except TypeError as error:
+    print(error)
 ```
 
 ## `del` and `ClassVar`

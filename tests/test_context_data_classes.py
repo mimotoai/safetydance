@@ -1,3 +1,5 @@
+import abc
+import enum
 import logging
 
 import pytest
@@ -7,7 +9,6 @@ from safetydance import (
     ContextDataNotSet,
     NoActiveContext,
     context_data,
-    initializer,
     script,
 )
 from safetydance._safetydance import ContextPropertyDescriptor
@@ -16,21 +17,32 @@ from safetydance._safetydance import ContextPropertyDescriptor
 @context_data
 class Base:
     a: int
-
-
-@context_data
-class Child(Base):
-    name: str
     n: int = 5
 
 
-@script
-def test_decorated_subclass_fields_read_values():
-    assert Child.n == 5
-    with pytest.raises(ContextDataNotSet):
-        Child.name
-    Child.a = 1
-    assert Base.a == 1
+def test_subclassing_a_decorated_class_raises():
+    with pytest.raises(TypeError, match="Base is a context_data class"):
+
+        @context_data
+        class Child(Base):
+            name: str
+
+
+def test_subclassing_without_the_decorator_raises():
+    with pytest.raises(TypeError, match="can't be subclassed"):
+
+        class Child(Base):
+            pass
+
+
+def test_subclassing_a_metaclass_built_class_raises():
+    class Built(metaclass=ContextData):
+        x: int = 1
+
+    with pytest.raises(TypeError, match=r"Child: .*Built is a context_data class"):
+
+        class Child(Built, metaclass=ContextData):
+            y: int = 2
 
 
 def test_double_decoration_is_a_no_op():
@@ -50,124 +62,12 @@ def test_double_decoration_is_a_no_op():
 @script
 def test_copied_field_descriptor_is_not_a_default():
     copy = ContextData(
-        "Copy", (), {"__annotations__": {"n": int}, "n": Child.__dict__["n"]}
+        "Copy", (), {"__annotations__": {"n": int}, "n": Base.__dict__["n"]}
     )
     assert copy.n == 5
     copy.n = 6
     assert copy.n == 6
-    assert Child.n == 5
-
-
-@context_data
-class Order:
-    total: float
-
-
-@context_data
-class Rush(Order):
-    total: float = 3.0
-
-
-def test_redeclared_field_shares_base_slot():
-    @script
-    def assign():
-        Rush.total = 7.0
-        assert Order.total == 7.0
-
-    @script
-    def read_default():
-        assert Rush.total == 3.0
-        with pytest.raises(ContextDataNotSet):
-            Order.total  # reading Rush's default stores nothing for Order
-
-    assign()
-    read_default()
-
-
-@context_data
-class Level:
-    level: int = 1
-
-
-@context_data
-class DeeperLevel(Level):
-    level: int = 2
-
-
-def test_redeclared_fields_read_their_own_default_until_assigned():
-    @script
-    def child_first():
-        return DeeperLevel.level, Level.level
-
-    @script
-    def base_first():
-        return Level.level, DeeperLevel.level
-
-    @script
-    def assigned():
-        Level.level = 5
-        return Level.level, DeeperLevel.level
-
-    assert child_first() == (2, 1)
-    assert base_first() == (1, 2)
-    assert assigned() == (5, 5)
-
-
-@context_data
-class Basket:
-    items: list[str] = initializer(lambda ctx: [])
-
-
-@context_data
-class GiftBasket(Basket):
-    items: list[str] = initializer(lambda ctx: ["card"])
-
-
-@script
-def test_redeclared_initializers_make_one_value_per_class():
-    GiftBasket.items.append("ribbon")
-    Basket.items.append("apple")
-    assert GiftBasket.items == ["card", "ribbon"]
-    assert Basket.items == ["apple"]
-    Basket.items = ["shared"]
-    assert GiftBasket.items == ["shared"]
-
-
-@script
-def test_del_redeclared_field_clears_every_class_default():
-    gift_items = GiftBasket.items
-    basket_items = Basket.items
-    del Basket.items
-    assert GiftBasket.items is not gift_items
-    assert Basket.items is not basket_items
-
-
-@context_data
-class Top:
-    level: str
-
-
-class Middle(Top):
-    pass
-
-
-@context_data
-class Leaf(Middle):
-    level: str = "leaf"
-
-
-def test_three_level_hierarchy():
-    classes = (Top, Middle, Leaf)
-
-    for assigned in classes:
-
-        @script
-        def run():
-            assigned.level = assigned.__name__
-            for klass in classes:
-                assert klass.level == assigned.__name__
-
-        run()
+    assert Base.n == 5
 
 
 @context_data
@@ -202,21 +102,19 @@ def test_del_unset_field_is_not_an_error():
         Shop.customer
 
 
+@script
+def test_del_field_through_an_instance_unsets_value():
+    shop = Shop()
+    shop.customer = "alice"
+    assert Shop.customer == "alice"
+    del shop.customer
+    with pytest.raises(ContextDataNotSet):
+        Shop.customer
+
+
 def test_del_field_outside_a_context_raises():
     with pytest.raises(NoActiveContext):
         del Shop.customer
-
-
-def test_del_redeclared_field_unsets_shared_slot():
-    @script
-    def run():
-        Order.total = 9.0
-        del Rush.total
-        with pytest.raises(ContextDataNotSet):
-            Order.total
-        assert Rush.total == 3.0
-
-    run()
 
 
 def test_del_non_field_attribute():
@@ -246,3 +144,70 @@ def test_del_field_is_traced(caplog):
     [deleted] = [r for r in caplog.records if " deleted by " in r.message]
     assert "customer" in deleted.message
     assert __file__ in deleted.message
+
+
+def test_failed_read_is_traced_as_not_found(caplog):
+    caplog.set_level(logging.INFO)
+
+    @script(tracing_log_level=logging.INFO)
+    def run():
+        with pytest.raises(ContextDataNotSet):
+            Shop.customer
+
+    run()
+    messages = [r.message for r in caplog.records]
+    assert any(" customer " in m and " not found by " in m for m in messages)
+    assert not any(" retrieved by " in m for m in messages)
+
+
+def test_slotted_class_can_be_decorated():
+    @context_data
+    class Slotted:
+        __slots__ = ("label", "__secret")
+        count: int = 1
+
+        def reveal(self):
+            self.__secret = "s"
+            return self.__secret
+
+    item = Slotted()
+    item.label = "x"
+    assert item.label == "x"
+    assert item.reveal() == "s"
+    assert not hasattr(item, "__dict__")
+
+    @script
+    def run():
+        Slotted.count = 2
+        return Slotted.count
+
+    assert run() == 2
+
+
+def test_abc_subclass_can_be_decorated():
+    @context_data
+    class Shape(abc.ABC):
+        sides: int = 3
+
+        @abc.abstractmethod
+        def area(self): ...
+
+    assert isinstance(Shape, ContextData)
+    assert isinstance(Shape, abc.ABCMeta)
+    with pytest.raises(TypeError, match="abstract"):
+        Shape()
+
+    @script
+    def run():
+        Shape.sides = 4
+        return Shape.sides
+
+    assert run() == 4
+
+
+def test_enum_cannot_be_decorated():
+    class Color(enum.Enum):
+        RED = 1
+
+    with pytest.raises(TypeError, match="Color: an Enum can't be a context_data"):
+        context_data(Color)

@@ -1,7 +1,10 @@
 import logging
+import re
 import sys
+import typing
 from collections.abc import MutableMapping
 from contextvars import ContextVar, copy_context
+from enum import EnumMeta
 from functools import cached_property, partialmethod, wraps
 from inspect import (
     isasyncgenfunction,
@@ -11,8 +14,7 @@ from inspect import (
     unwrap,
 )
 from logging import Logger
-from types import FrameType
-from weakref import WeakSet
+from types import FrameType, MemberDescriptorType
 from typing import Any, Callable, ClassVar, Generic, ParamSpec, TypeVar, get_origin, overload
 
 if sys.version_info >= (3, 14):
@@ -92,9 +94,6 @@ class ContextProperty(Generic[T]):
     description: str | None
     initializer: Callable[["Context"], T] | None
     declaring_cls: type | None
-    _key: "ContextProperty"
-    _default_key: "_DefaultKey"
-    _sharing: "WeakSet[ContextProperty]"
 
     def __init__(
         self,
@@ -107,11 +106,6 @@ class ContextProperty(Generic[T]):
         self.description = description
         self.initializer = initializer
         self.declaring_cls = declaring_cls
-        self._key = self
-        self._default_key = _DefaultKey(self)
-        # The properties whose values are stored under this one: itself and, for a
-        # base class field, the subclass fields that redeclare it.
-        self._sharing = WeakSet([self])
 
     @property
     def value(self) -> T:
@@ -135,41 +129,31 @@ class ContextProperty(Generic[T]):
         """Write the value in ``context`` instead of the active context: ``prop[ctx] = v``."""
         self._set(context, new_value, sys._getframe(1))
 
-    # Values are stored under _key (the property itself, or the base class's property
-    # for a redeclared field), so same-named properties never collide. Defaults are
-    # stored under _default_key, one per property, so a redeclared field reads its own
-    # class's default until a value is stored; that key is private, so it goes through
-    # the Context's storage rather than its typed mapping. The name is only a read
-    # fallback, which lets values supplied by name (e.g. test fixtures via
-    # test_context) bind to the property.
+    # Values are stored under the property itself, so same-named properties never
+    # collide. The name is only a read fallback, which lets values supplied by name
+    # (e.g. test fixtures via test_context) bind to the property.
     def _get(self, context: "Context", frame: FrameType) -> T:
-        found = True
-        if self._key in context:
-            value = context[self._key]
-        elif self._default_key in context._data:
-            value = context._data[self._default_key]
+        if self in context:
+            value = context[self]
         elif self.name and self.name in context:
             value = context[self.name]
         elif self.initializer is not None:
             value = self.initializer(context)
-            context._data[self._default_key] = value
+            context[self] = value
             context._trace(self, "initialized", frame)
         else:
-            found = False
-        context._trace(self, "retrieved", frame)
-        if not found:
+            context._trace(self, "not found", frame)
             raise ContextDataNotSet(f"ContextData {self} not found in Context")
+        context._trace(self, "retrieved", frame)
         return value
 
     def _set(self, context: "Context", new_value: T, frame: FrameType):
         context._trace(self, "set", frame)
-        context[self._key] = new_value
+        context[self] = new_value
 
     def _unset(self, context: "Context", frame: FrameType):
         context._trace(self, "deleted", frame)
-        context.pop(self._key, None)
-        for prop in list(self._key._sharing):
-            context._data.pop(prop._default_key, None)
+        context.pop(self, None)
 
     def __repr__(self) -> str:
         if self.name and self.declaring_cls:
@@ -189,22 +173,9 @@ class ContextProperty(Generic[T]):
         context = get_context()
         return bool(
             (self.name and self.name in context)
-            or self._key in context
-            or self._default_key in context._data
+            or self in context
             or self.initializer is not None
         )
-
-
-class _DefaultKey:
-    """Where a property's default is stored once read, apart from assigned values."""
-
-    __slots__ = ("prop",)
-
-    def __init__(self, prop: ContextProperty):
-        self.prop = prop
-
-    def __repr__(self) -> str:
-        return f"<default of {self.prop!r}>"
 
 
 class Context(MutableMapping[ContextProperty | str, Any]):
@@ -295,10 +266,14 @@ class Context(MutableMapping[ContextProperty | str, Any]):
     def _trace(self, context_data: ContextProperty, op: str, frame: FrameType):
         # Logged once: by this context if it traces, else by the innermost active
         # context that does, so tracing a script also traces the scripts it calls.
+        # The stack is scanned on each access rather than caching the tracer at
+        # __enter__, because a context's tracing flag may change while it is active.
         tracer = self if self.tracing else None
         if tracer is None:
-            tracing = (c for c in reversed(_ACTIVE_CONTEXTS.get()) if c.tracing)
-            tracer = next(tracing, None)
+            for active in reversed(_ACTIVE_CONTEXTS.get()):
+                if active.tracing:
+                    tracer = active
+                    break
         if tracer is not None:
             filename = frame.f_code.co_filename
             lineno = frame.f_lineno
@@ -413,11 +388,16 @@ def _require_callable(names: str, func: Any) -> None:
         )
 
 
-def _context_factory(
+# The body behind context/script and test_context. Each keeps its own overloads,
+# which type checkers need per public name, and its own docstring.
+def _script_decorator(
+    names: str,
+    func: Callable[..., Any] | None,
     tracing_log_level: int | None,
     tracing_logger: Logger | None,
     with_fixtures: bool,
-) -> Callable[[dict], Context]:
+) -> Any:
+    _require_callable(names, func)
     tracing = tracing_log_level is not None or tracing_logger is not None
 
     def make_context(kwargs: dict) -> Context:
@@ -430,7 +410,10 @@ def _context_factory(
             ),
         )
 
-    return make_context
+    def decorator(func):
+        return _in_new_context(func, make_context)
+
+    return decorator(func) if func is not None else decorator
 
 
 @overload
@@ -481,13 +464,9 @@ def context(
     turns on tracing of context data access. A non-callable positional argument
     raises ``TypeError``. ``script`` is an alias of ``context``.
     """
-    _require_callable("script/context", func)
-    make_context = _context_factory(tracing_log_level, tracing_logger, False)
-
-    def decorator(func):
-        return _in_new_context(func, make_context)
-
-    return decorator(func) if func is not None else decorator
+    return _script_decorator(
+        "script/context", func, tracing_log_level, tracing_logger, with_fixtures=False
+    )
 
 
 script = context
@@ -532,13 +511,9 @@ def test_context(
     functions are the same as for ``script``. ``test_context`` itself is not
     collected by pytest.
     """
-    _require_callable("test_context", func)
-    make_context = _context_factory(tracing_log_level, tracing_logger, True)
-
-    def decorator(func):
-        return _in_new_context(func, make_context)
-
-    return decorator(func) if func is not None else decorator
+    return _script_decorator(
+        "test_context", func, tracing_log_level, tracing_logger, with_fixtures=True
+    )
 
 
 # The name starts with "test", so stop pytest collecting it wherever it is imported.
@@ -564,6 +539,9 @@ class ContextPropertyDescriptor:
 
     def __set__(self, instance, value):
         self.context_data._set(get_context(), value, sys._getframe(1))
+
+    def __delete__(self, instance):
+        self.context_data._unset(get_context(), sys._getframe(1))
 
 
 class _Initializer:
@@ -602,18 +580,28 @@ def _initializer_for(field_name: str, default: Any) -> Callable[["Context"], Any
     return lambda ctx: default
 
 
-def _is_classvar(type_hint: Any) -> bool:
+# The module of an annotation's prefix ("t" in "t.ClassVar[int]"), or the object a bare
+# name ("CV" from `from typing import ClassVar as CV`) refers to, is looked up in the
+# defining module's globals, as dataclasses does for string annotations.
+_CLASSVAR_TEXT = re.compile(r"^\s*(?:(\w+)\s*\.\s*)?(\w+)\s*(?:\[|$)")
+
+
+def _is_classvar(type_hint: Any, module_globals: dict[str, Any]) -> bool:
     """Whether an annotation is ClassVar, as an object, a string or a ForwardRef."""
     if type_hint is ClassVar or get_origin(type_hint) is ClassVar:
         return True
     text = type_hint if isinstance(type_hint, str) else getattr(type_hint, "__forward_arg__", None)
     if text is None:
         return False
-    text = text.strip()
-    return text.startswith(("ClassVar[", "typing.ClassVar[")) or text in (
-        "ClassVar",
-        "typing.ClassVar",
-    )
+    match = _CLASSVAR_TEXT.match(text)
+    if match is None:
+        return False
+    prefix, name = match.groups()
+    if prefix is None:
+        return name == "ClassVar" or module_globals.get(name) is ClassVar
+    if prefix == "typing" or module_globals.get(prefix) is typing:
+        return name == "ClassVar"
+    return False
 
 
 class ContextData(type):
@@ -635,29 +623,32 @@ class ContextData(type):
     raise ``ValueError``. ``ClassVar`` annotations are ordinary class attributes; an
     ``initializer()`` default on one raises ``TypeError``.
 
-    A subclass that redeclares a field shares the base class's value; only the
-    default differs. Until a value is stored, each class reads its own default (an
-    ``initializer()`` gives each class its own value); once one is stored through
-    either class, both read it. So with ``level: int = 1`` on ``Base`` and
-    ``level: int = 2`` on ``Child(Base)``, ``Base.level`` is 1 and ``Child.level`` is
-    2 until ``Base.level = 5`` makes both 5. A redeclared field with no default
-    raises until a value is stored. ``del`` through either class clears the stored
-    value and both defaults. ``@context_data`` does the same for a class defined
-    without the metaclass.
+    Classes built with ContextData are final: subclassing one raises ``TypeError``.
+    Declare related fields on another class instead. A ContextData class may itself
+    have ordinary base classes.
     """
 
     def __new__(mcls, name, bases, namespace, **kwds):
+        for base in bases:
+            if isinstance(base, ContextData):
+                raise TypeError(
+                    f"{name}: {base.__qualname__} is a context_data class, which can't "
+                    "be subclassed; declare these fields on a separate context_data "
+                    "class"
+                )
         # Annotations are read from the finished class: on 3.14+ the namespace holds
         # a lazy __annotate__ function rather than an __annotations__ dict.
         ret = super().__new__(mcls, name, bases, namespace, **kwds)
         annotations = _own_annotations(ret)
+        module = sys.modules.get(ret.__module__)
+        module_globals = vars(module) if module is not None else {}
         for field_name, value in namespace.items():
             if isinstance(value, _Initializer) and field_name not in annotations:
                 raise TypeError(
                     f"initializer() default for {field_name!r} needs a type annotation"
                 )
         for field_name, type_hint in annotations.items():
-            if _is_classvar(type_hint):
+            if _is_classvar(type_hint, module_globals):
                 if isinstance(namespace.get(field_name), _Initializer):
                     raise TypeError(
                         f"initializer() default for {field_name!r} can't be used on a "
@@ -671,34 +662,25 @@ class ContextData(type):
                 initializer = default.context_data.initializer
             elif default is not _NO_DEFAULT:
                 initializer = _initializer_for(field_name, default)
-            inherited = _field_descriptor(ret.__mro__[1:], field_name)
             context_data = ContextProperty[type_hint](
                 field_name, initializer=initializer, declaring_cls=ret
             )
-            if inherited is not None:
-                # D2: a redeclared field shares the base's value; only the default changes.
-                context_data._key = inherited.context_data._key
-                context_data._key._sharing.add(context_data)
             # Bypass ContextData.__setattr__, which would route to the descriptor.
             type.__setattr__(
                 ret, field_name, ContextPropertyDescriptor(field_name, context_data)
             )
         return ret
 
-    def __init__(cls, name, bases, namespace, **kwds):
-        super().__init__(name, bases, namespace)
-
-    # Names resolve the way attribute lookup does, so fields inherited from a base class
-    # are set (or unset) in the context rather than shadowed on the subclass. The
+    # Fields are set (or unset) in the context rather than replaced on the class. The
     # property is called directly so the trace frame is the user's statement.
     def __setattr__(self, name, value):
-        field = _field_descriptor(self.__mro__, name)
+        field = _field_descriptor(self, name)
         if field is not None:
             return field.context_data._set(get_context(), value, sys._getframe(1))
         return super().__setattr__(name, value)
 
     def __delattr__(self, name):
-        field = _field_descriptor(self.__mro__, name)
+        field = _field_descriptor(self, name)
         if field is not None:
             return field.context_data._unset(get_context(), sys._getframe(1))
         return super().__delattr__(name)
@@ -707,13 +689,24 @@ class ContextData(type):
 _NO_DEFAULT = object()
 
 
-def _field_descriptor(mro, name: str) -> ContextPropertyDescriptor | None:
-    """The descriptor attribute lookup would find for name, if it is a field."""
-    for klass in mro:
-        if name in klass.__dict__:
-            attr = klass.__dict__[name]
-            return attr if isinstance(attr, ContextPropertyDescriptor) else None
-    return None
+def _field_descriptor(cls: type, name: str) -> ContextPropertyDescriptor | None:
+    """The field named name, if cls declares one."""
+    attr = cls.__dict__.get(name)
+    return attr if isinstance(attr, ContextPropertyDescriptor) else None
+
+
+_COMBINED_METACLASSES: dict[type, type] = {}
+
+
+def _with_context_data(metaclass: type) -> type:
+    """A metaclass combining ContextData with the decorated class's own (e.g. ABCMeta)."""
+    if metaclass not in _COMBINED_METACLASSES:
+        _COMBINED_METACLASSES[metaclass] = type(
+            f"ContextData{metaclass.__name__}",
+            (ContextData, metaclass),
+            {"__module__": __name__},
+        )
+    return _COMBINED_METACLASSES[metaclass]
 
 
 def _retarget_class_cells(old_cls: type, new_cls: type):
@@ -759,14 +752,14 @@ def context_data(cls: type[T]) -> type[T]:
 
     A default wrapped in ``initializer()`` is called with the Context on first read;
     any other default is a constant. Unhashable defaults raise ``ValueError``, as
-    with dataclasses.
-
-    A subclass that redeclares a field shares the base class's value; until one is
-    stored, each class reads its own default (see ``ContextData``).
+    with dataclasses. The decorated class is final: subclassing it raises
+    ``TypeError``.
 
     The decorator rebuilds the class, so a base class's ``__init_subclass__`` runs
     again and class keywords are not carried over; use ``metaclass=ContextData`` for
-    those.
+    those. A class whose metaclass is not ``type`` (an ``abc.ABC`` subclass, say)
+    is rebuilt with a metaclass derived from both. Classes with ``__slots__`` are
+    supported.
 
     Usage::
 
@@ -777,21 +770,28 @@ def context_data(cls: type[T]) -> type[T]:
             field3: list = initializer(lambda ctx: [])
     """
     if isinstance(cls, ContextData):
-        # Already built by the metaclass: a subclass of a ContextData class, or a
-        # class decorated twice.
+        # Already built by the metaclass: the class was decorated twice.
         return cls
 
-    # Create a new namespace dictionary from the class's __dict__
-    namespace = {}
-    for key, value in cls.__dict__.items():
-        if key not in ("__dict__", "__weakref__", "__annotate_func__", "__annotations_cache__"):
-            namespace[key] = value
+    # Rebuild from the class's own namespace. Its slot descriptors are dropped (under
+    # their mangled names too) because the rebuilt class creates its own from
+    # __slots__.
+    skipped = ("__dict__", "__weakref__", "__annotate_func__", "__annotations_cache__")
+    namespace = {
+        key: value
+        for key, value in cls.__dict__.items()
+        if key not in skipped
+        and not (isinstance(value, MemberDescriptorType) and value.__objclass__ is cls)
+    }
 
     # Carry the annotations over explicitly (3.14+ stores them lazily)
     namespace["__annotations__"] = _own_annotations(cls)
     namespace["__qualname__"] = cls.__qualname__
 
-    # Create a new class with the same name, bases, and namespace, but with ContextData as metaclass
-    new_cls: type[T] = ContextData(cls.__name__, cls.__bases__, namespace)  # type: ignore[assignment]
+    metaclass: type = type(cls)
+    if issubclass(metaclass, EnumMeta):
+        raise TypeError(f"{cls.__qualname__}: an Enum can't be a context_data class")
+    metaclass = ContextData if metaclass is type else _with_context_data(metaclass)
+    new_cls: type[T] = metaclass(cls.__name__, cls.__bases__, namespace)
     _retarget_class_cells(cls, new_cls)
     return new_cls

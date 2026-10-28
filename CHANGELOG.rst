@@ -16,9 +16,8 @@ rewritten.
 * ``ContextProperty`` declares a context variable, and ``@context_data``
   classes declare several; ``initializer(...)`` marks a default computed from
   the context on first read. ``prop(ctx)`` and ``prop[ctx] = value`` read and
-  write a given context. Subclasses inherit fields; a field a subclass
-  redeclares shares the base's value and reads its own default until a value
-  is stored.
+  write a given context. ``@context_data`` classes are final: subclassing one
+  raises ``TypeError``.
 * ``@script`` (also ``@context``) runs a function in a fresh ``Context``;
   generator and ``async`` functions can be scripts, and concurrent asyncio
   tasks each see their own context. ``@test_context`` puts pytest fixtures in

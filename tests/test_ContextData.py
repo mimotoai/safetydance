@@ -277,15 +277,6 @@ def test_fixture_binds_to_context_data_field_by_name():
     uses_fixture(total=5.0)
 
 
-@context
-def test_subclass_without_annotations_inherits_fields():
-    class Child(Order):
-        pass
-
-    Child.total = 3.0
-    assert Child.total == 3.0
-
-
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="lazy annotations")
 @context
 def test_forward_reference_annotation_is_allowed():
@@ -323,25 +314,6 @@ def test_rebuilt_class_keeps_qualname():
 
     assert Local.__qualname__.endswith("<locals>.Local")
 
-
-def test_subclass_assignment_of_inherited_field_goes_to_context():
-    class Child(Order):
-        pass
-
-    @context
-    def run():
-        Child.total = 7.0
-        assert Order.total == 7.0
-
-    run()
-    assert "total" not in Child.__dict__
-
-    @context
-    def next_run():
-        with pytest.raises(KeyError):
-            Child.total
-
-    next_run()
 
 
 def test_non_field_class_attribute_can_be_assigned():
