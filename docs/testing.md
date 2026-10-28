@@ -199,6 +199,44 @@ identifier, is a keyword or is `<lambda>`, and `TypeError` for something
 without a `__name__` and `__module__`. The same `ValueError` applies to names
 and namespace segments given to `step_namespace` and `register_steps`.
 
+### When a module is loaded twice
+
+Python treats each module name as a separate module, so a file that is
+reachable under two names, or executed twice, runs twice. Common triggers:
+
+* Two `sys.path` entries reach the same file. Under pytest's default
+  `--import-mode=prepend`, a test directory without `__init__.py` is put on
+  `sys.path`, so `tests/example/steps.py` can be both `example.steps` and
+  `tests.example.steps`. The same happens with `PYTHONPATH=.:src`, or an IDE
+  that adds both the repo root and `src`, which makes `src.pkg.steps` and
+  `pkg.steps` both importable.
+* Importing from `conftest.py`. pytest imports a conftest under its own name,
+  so `from conftest import ...` or `from tests.conftest import ...` can load a
+  second copy. Steps defined in a conftest are the most likely way to hit
+  this.
+* Running a step module as a script (`python pkg/steps.py`,
+  `python -m pkg.steps`). It runs as `__main__`, and an import of `pkg.steps`
+  runs it again.
+* Re-running code under the same name: `importlib.reload()`, or re-running a
+  notebook cell. This is not strictly a double import, but it has the same
+  effect, and the colliding copies even share the full module path.
+
+Only steps whose defaults or captured values include non-builtin objects
+(functions, classes, sentinels, instances) are affected. Plain steps, and
+steps with only builtin values, are recognised as one step. An affected step
+raises `AmbiguousStep` on its bare name and its short namespace path. Each
+copy's full module path still resolves when the copies have different module
+names, except `__main__`, which cannot be typed; after a reload or a cell
+re-run the full path is shared, so it is ambiguous too.
+
+To avoid it:
+
+* give test packages an `__init__.py` and import them one way, or use
+  `--import-mode=importlib`;
+* don't import from `conftest.py`;
+* keep runnable scripts separate from step modules;
+* before a reload or a cell re-run, `unregister_steps` the old steps.
+
 ### Importing step modules
 
 A step exists once its module has been imported. Either import the step
