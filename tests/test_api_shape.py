@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from safetydance import Context, ContextProperty, script, test_context
+from safetydance import Context, ContextProperty, context, script, test_context
 
 
 def test_has_value_replaces_is_set():
@@ -19,9 +19,11 @@ def test_has_value_replaces_is_set():
 
 
 def test_tracing_level_is_keyword_only():
-    with pytest.raises(TypeError, match="keyword"):
+    with pytest.raises(TypeError, match="script.*keyword-only"):
         script(logging.DEBUG)
-    with pytest.raises(TypeError, match="keyword"):
+    with pytest.raises(TypeError, match="context.*keyword-only"):
+        context(logging.DEBUG)
+    with pytest.raises(TypeError, match="test_context.*keyword-only"):
         test_context(logging.DEBUG)
 
 

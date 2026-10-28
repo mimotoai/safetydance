@@ -1,7 +1,9 @@
 import asyncio
+import gc
 import inspect
 import sys
 import threading
+import weakref
 from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor
 
@@ -292,6 +294,41 @@ def test_send_and_throw_into_generator_script():
     assert next(gen) == "ready"
     assert gen.send(42) == (42, "data")
     assert gen.throw(ValueError) == ("caught", "data")
+
+
+def test_generator_script_returning_before_its_first_yield():
+    @script
+    def produce():
+        slot.value = "early"
+        return slot.value
+        yield
+
+    with pytest.raises(StopIteration) as stop:
+        next(produce())
+    assert stop.value.value == "early"
+
+
+def test_thrown_exception_is_not_kept_by_a_suspended_generator_script():
+    class Marker(Exception):
+        pass
+
+    @script
+    def produce():
+        while True:
+            try:
+                yield
+            except Marker:
+                pass
+
+    gen = produce()
+    next(gen)
+    thrown = Marker()
+    gen.throw(thrown)
+    ref = weakref.ref(thrown)
+    del thrown
+    gc.collect()
+    assert ref() is None
+    gen.close()
 
 
 def test_generator_finally_runs_in_context_on_close():

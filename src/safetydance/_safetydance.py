@@ -362,6 +362,9 @@ def _in_new_context(
                         produced = run(step, arg)
                     except StopIteration as stop:
                         return stop.value
+                    # A thrown exception's traceback holds this frame; don't keep it
+                    # alive while suspended.
+                    arg = None
             finally:
                 run(new_context.__exit__, None, None, None)
 
@@ -375,11 +378,11 @@ def _in_new_context(
     return wrapper
 
 
-def _require_callable(name: str, func: Any) -> None:
+def _require_callable(names: str, func: Any) -> None:
     if func is not None and not callable(func):
         raise TypeError(
-            f"@{name} got {func!r} as its function; the tracing options are "
-            f"keyword-only, e.g. @{name}(tracing_log_level=...)"
+            f"{names}: got {func!r} as the function to decorate; the tracing "
+            "options are keyword-only: pass tracing_log_level=... or tracing_logger=..."
         )
 
 
@@ -451,7 +454,7 @@ def context(
     turns on tracing of context data access. A non-callable positional argument
     raises ``TypeError``. ``script`` is an alias of ``context``.
     """
-    _require_callable("context", func)
+    _require_callable("script/context", func)
     make_context = _context_factory(tracing_log_level, tracing_logger, False)
 
     def decorator(func):
@@ -602,7 +605,8 @@ class ContextData(type):
     A default wrapped in ``initializer(fn)`` is called with the Context on first
     read; any other default is a constant. A field with no default raises
     ``ContextDataNotSet`` until it is set. Unhashable defaults such as ``[]``
-    raise ``ValueError``. ``ClassVar`` annotations are ordinary class attributes.
+    raise ``ValueError``. ``ClassVar`` annotations are ordinary class attributes; an
+    ``initializer()`` default on one raises ``TypeError``.
 
     A subclass that redeclares a field shares the base class's value and only
     changes the default. ``@context_data`` does the same for a class defined without
@@ -621,6 +625,11 @@ class ContextData(type):
                 )
         for field_name, type_hint in annotations.items():
             if _is_classvar(type_hint):
+                if isinstance(namespace.get(field_name), _Initializer):
+                    raise TypeError(
+                        f"initializer() default for {field_name!r} can't be used on a "
+                        "ClassVar, which is an ordinary class attribute"
+                    )
                 continue
             initializer = None
             default = namespace.get(field_name, _NO_DEFAULT)
@@ -692,8 +701,8 @@ def _retarget_class_cells(old_cls: type, new_cls: type):
             if not callable(func):
                 continue
             # Decorators built with functools.wraps hide the original behind __wrapped__.
-            # unwrap stops on cycles and endless chains; an object whose attribute lookup
-            # fails is not a method of the class body, so it is left alone.
+            # unwrap stops on cycles and endless chains; an object whose attribute
+            # lookup fails is not a method of the class body, so it is left alone.
             try:
                 func = unwrap(func)
                 code = getattr(func, "__code__", None)

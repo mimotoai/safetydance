@@ -431,6 +431,35 @@ def test_classvar_is_not_a_field():
     assert read() == 3
 
 
+def test_initializer_on_classvar_raises():
+    from typing import ClassVar
+
+    with pytest.raises(TypeError, match="'registry'.*ClassVar"):
+
+        @context_data
+        class Constants:
+            registry: ClassVar[list] = initializer(lambda ctx: [])
+
+
+@pytest.mark.parametrize("annotation", ["ClassVar[list]", "typing.ClassVar[list]"])
+def test_initializer_on_string_classvar_raises(annotation):
+    namespace = {
+        "__annotations__": {"registry": annotation},
+        "registry": initializer(lambda ctx: []),
+    }
+    with pytest.raises(TypeError, match="'registry'.*ClassVar"):
+        safetydance.ContextData("Constants", (), namespace)
+
+
+def test_instance_assignment_sets_the_field_in_the_context():
+    @context
+    def assign():
+        Defaults().count = 7
+        return Defaults.count
+
+    assert assign() == 7
+
+
 def test_metaclass_accepts_class_keywords():
     class Base:
         def __init_subclass__(cls, tag=None, **kwargs):
