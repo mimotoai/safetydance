@@ -92,20 +92,21 @@ def _step_name(f: Callable[..., Any]) -> str:
 
 def _layers(f: Callable[..., Any]) -> list[Any]:
     """``f`` and each object it wraps through ``__wrapped__``, stopping at a cycle."""
-    # The list keeps every layer alive, so an identity check cannot see a reused id.
+    # The list keeps every layer alive, so no id in seen can be reused.
     layers: list[Any] = []
+    seen: set[int] = set()
     layer: Any = f
-    while layer is not None and not any(layer is seen for seen in layers):
+    while layer is not None and id(layer) not in seen:
+        if len(layers) >= sys.getrecursionlimit():
+            # As inspect.unwrap does for a chain that never ends.
+            raise ValueError(f"wrapper loop when unwrapping {f!r}")
         layers.append(layer)
+        seen.add(id(layer))
         layer = getattr(layer, "__wrapped__", None)
     return layers
 
 
-def _function_key(f: Any, active: frozenset[int]) -> _Key:
-    if id(f) in active:
-        # A function that captures itself, as a recursive closure does.
-        return ("<cycle>",)
-    active = active | {id(f)}
+def _function_key(f: Any) -> _Key:
     code: CodeType = f.__code__
     # A pseudo-file such as "<string>" does not identify the source, so the module
     # tells apart code exec'd in different modules.
@@ -118,7 +119,7 @@ def _function_key(f: Any, active: frozenset[int]) -> _Key:
         except ValueError:
             cells.append(("<empty>",))
         else:
-            cells.append(_value_key(contents, active))
+            cells.append(_value_key(contents, f))
     return (
         code.co_filename,
         code.co_firstlineno,
@@ -126,23 +127,70 @@ def _function_key(f: Any, active: frozenset[int]) -> _Key:
         # Code compares by value, so different code at one location stays distinct.
         code,
         module,
-        tuple(_value_key(v, active) for v in getattr(f, "__defaults__", None) or ()),
-        tuple((name, _value_key(v, active)) for name, v in sorted(kwdefaults.items())),
+        tuple(_value_key(v, f) for v in getattr(f, "__defaults__", None) or ()),
+        tuple((name, _value_key(v, f)) for name, v in sorted(kwdefaults.items())),
         tuple(cells),
     )
 
 
-def _value_key(value: Any, active: frozenset[int]) -> Any:
-    # By value where possible, so a module imported twice gives equal keys.
-    if ismethod(value):
-        return ("<method>", id(value.__self__), _value_key(value.__func__, active))
+# Builtin types whose values compare equal across imports; any other value bound
+# to a module global is keyed by that global's name.
+_VALUE_TYPES = (type(None), bool, int, float, complex, str, bytes, tuple, frozenset, range)
+
+
+def _source_file(value: Any, owner: Any) -> str | None:
+    """The file that defines the function or class ``value``, if it can be told."""
     if isinstance(value, FunctionType):
-        return _function_key(value, active)
+        return value.__code__.co_filename
+    for attribute in vars(value).values():
+        method = getattr(attribute, "__func__", attribute)
+        if isinstance(method, FunctionType) and method.__qualname__.startswith(
+            f"{value.__qualname__}."
+        ):
+            return method.__code__.co_filename
+    if value.__module__ == getattr(owner, "__module__", None):
+        return owner.__code__.co_filename
+    return getattr(sys.modules.get(value.__module__), "__file__", None)
+
+
+def _type_key(cls: type, owner: Any) -> Any:
+    return cls if cls.__module__ == "builtins" else _value_key(cls, owner)
+
+
+def _value_key(value: Any, owner: Any) -> Any:
+    """
+    Key a default or captured ``value`` of the function ``owner``.
+
+    By value where possible, so a module imported twice gives equal keys.
+    """
+    if ismethod(value):
+        return ("<method>", _value_key(value.__self__, owner), _value_key(value.__func__, owner))
+    if isinstance(value, (FunctionType, type)):
+        source = _source_file(value, owner)
+        if source is not None:
+            module = value.__module__ if source.startswith("<") else None
+            return ("<def>", source, value.__qualname__, module)
+    if not isinstance(value, _VALUE_TYPES):
+        # Sentinels and module-level instances compare by identity, so each import
+        # has its own; the global's name is the same in both.
+        for name, bound in getattr(owner, "__globals__", {}).items():
+            if bound is value:
+                return ("<global>", name)
+    kind = _type_key(type(value), owner)
+    if isinstance(value, (tuple, frozenset)):
+        # Element by element, so that (1,) and (1.0,) stay apart.
+        items = (_value_key(item, owner) for item in value)
+        return (kind, tuple(items) if isinstance(value, tuple) else frozenset(items))
+    if isinstance(value, float):
+        # hex() tells apart 0.0 and -0.0, and makes NaN equal to itself.
+        return (kind, value.hex())
+    if isinstance(value, complex):
+        return (kind, value.real.hex(), value.imag.hex())
     try:
         hash(value)
     except Exception:
         return ("<id>", id(value))
-    return (type(value), value)
+    return (kind, value)
 
 
 def _layer_key(layer: Any) -> _Key:
@@ -150,7 +198,7 @@ def _layer_key(layer: Any) -> _Key:
         # A bound method forwards __code__, so methods of different instances share it.
         return ("<method>", id(layer.__self__), _layer_key(layer.__func__))
     if isinstance(getattr(layer, "__code__", None), CodeType):
-        return _function_key(layer, frozenset())
+        return _function_key(layer)
     return ("<object>", id(layer))
 
 
@@ -269,6 +317,8 @@ class _Registry:
         if namespace is not None:
             paths.append((*namespace, name))
         importer = self._importer() or f.__module__
+        # Dict lookups on keys run the __eq__ and __hash__ of defaults and captured
+        # values, user code included, under _lock.
         with self._lock:
             for path in paths:
                 registered = self._default.setdefault(path, {})
@@ -284,6 +334,7 @@ class _Registry:
             path = (*namespace, _step_name(f))
             bindings.setdefault(path, []).append((_step_key(f), f))
         importer = self._importer()
+        # As in add_default, comparing keys runs user __eq__ and __hash__ under _lock.
         with self._lock:
             # Check every conflict before binding anything, so a failure binds nothing.
             for path, items in bindings.items():

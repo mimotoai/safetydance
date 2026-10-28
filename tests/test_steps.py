@@ -834,10 +834,163 @@ def test_full_path_is_advised_when_it_does_not_pass_through_the_name():
     assert Given.x.y.get() == "xy"
 
 
-# Review fixes: paths a message may advise, and namespace internals.
+# Review fixes: identity of values a double import duplicates.
+
+DOUBLE_IMPORT_SOURCE = """\
+_MISSING = object()
+
+
+class Client:
+    pass
+
+
+client = Client()
+
+
+def make():
+    captured = client
+
+    def fetch():
+        return captured
+
+    return fetch
+
+
+def get(data=_MISSING):
+    return "get"
+
+
+def post(cls=Client):
+    return "post"
+
+
+fetch = make()
+"""
+
+
+def import_twice(source, filename="/src/example/steps.py"):
+    """Exec ``source`` as example.steps and as tests.example.steps, from one file."""
+    copies = []
+    for module in ["example.steps", "tests.example.steps"]:
+        namespace = {"__name__": module}
+        exec(compile(source, filename, "exec"), namespace)
+        copies.append(namespace)
+    return copies
+
+
+@pytest.mark.parametrize("name", ["get", "post", "fetch"])
+def test_double_import_dedupes_identity_values(name):
+    # A sentinel default, a class default and a captured module-level instance:
+    # each import has its own object, bound to the same global name.
+    first, second = import_twice(DOUBLE_IMPORT_SOURCE)
+    assert first[name] is not second[name]
+    step_namespace("http")(first[name])
+    step_namespace("http")(second[name])
+    assert getattr(Given, name) is second[name]
+    assert getattr(Given.http, name) is second[name]
+
+
+@pytest.mark.parametrize(
+    "body",
+    # With no method, the class shares the step's module, so the step's file is
+    # its file. With a method and a module that is not imported, the method's file.
+    ["pass", "__module__ = 'not_imported'\n    def ping(self):\n        return 1"],
+)
+def test_double_import_dedupes_a_class_default_not_bound_to_a_global(body):
+    # Keyed by where the class is defined, though no global names it.
+    source = (
+        f"class Client:\n    {body}\n"
+        "def post(cls=Client):\n"
+        "    return cls\n"
+        "del Client\n"
+    )
+    first, second = import_twice(source)
+    step(first["post"])
+    step(second["post"])
+    assert Given.post is second["post"]
+
+
+def test_different_sentinels_in_one_module_are_distinct_steps():
+    namespace = {"__name__": "pkg_a.steps"}
+    source = (
+        "_A = object()\n"
+        "_B = object()\n"
+        "def make(value):\n"
+        "    def get(data=value):\n"
+        "        return data\n"
+        "    return get\n"
+    )
+    exec(compile(source, "/src/pkg_a/steps.py", "exec"), namespace)
+    step_namespace("a")(namespace["make"](namespace["_A"]))
+    step_namespace("b")(namespace["make"](namespace["_B"]))
+    assert Given.a.get() is namespace["_A"]
+    assert Given.b.get() is namespace["_B"]
+    with pytest.raises(AmbiguousStep):
+        Given.get
+
+
+def test_a_global_bound_later_does_not_change_a_steps_key():
+    # Builtin values key by value, so naming one in a global later in the module
+    # does not make a second registration of the same function a different step.
+    namespace = {"__name__": "pkg_a.steps"}
+    source = (
+        "from safetydance._steps import step, step_namespace\n"
+        "@step\n"
+        "def get(flag=True):\n"
+        "    return flag\n"
+        "FLAG = True\n"
+        "step_namespace('later')(get)\n"
+    )
+    exec(compile(source, "/src/pkg_a/steps.py", "exec"), namespace)
+    assert Given.get() is True
+    assert Given.later.get is Given.get
+
+
+def make_returning(value):
+    def get():
+        return value
+
+    return get
+
+
+@pytest.mark.parametrize(
+    "a, b",
+    [((1,), (1.0,)), (0.0, -0.0), (frozenset({1}), frozenset({True})), (1, True), (0j, -0j)],
+)
+def test_equal_values_of_different_types_or_signs_are_distinct_steps(a, b):
+    step_namespace("a")(make_returning(a))
+    step_namespace("b")(make_returning(b))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+
+
+def test_nan_values_are_one_step():
+    step_namespace("a")(make_returning(float("nan")))
+    step_namespace("b")(make_returning(float("nan")))
+    assert Given.get is Given.b.get
 
 
 def test_path_segment_named_like_the_namespace_slot_resolves():
     step(make_step("pkg._path.steps", "get", "p"))
     assert Given.pkg._path.steps.get() == "p"
     assert "_path" in dir(Given.pkg)
+
+
+class Endless:
+    """A callable whose __wrapped__ is a new object every time."""
+
+    __name__ = "endless"
+
+    def __call__(self):
+        return None
+
+    @property
+    def __wrapped__(self):
+        return Endless()
+
+
+def test_endless_wrapped_chain_raises_value_error():
+    with pytest.raises(ValueError, match="wrapper loop"):
+        step(Endless())
+    with pytest.raises(ValueError, match="wrapper loop"):
+        unregister_steps(Endless())
