@@ -1,8 +1,11 @@
-import nox_poetry as nox
+import nox
+
+nox.options.default_venv_backend = "uv"
+
+PYPROJECT = nox.project.load_toml("pyproject.toml")
 
 
-@nox.session(python=["3.8", "3.9", "3.10", "3.11",])
+@nox.session(python=["3.10", "3.11", "3.12", "3.13"])
 def test(session):
-    session.install('pytest', '.')
-    session.install('pytest-cov', '.')
-    session.run('pytest')
+    session.install(".", *nox.project.dependency_groups(PYPROJECT, "test"))
+    session.run("pytest")

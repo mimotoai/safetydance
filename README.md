@@ -44,5 +44,8 @@ conversational style of programming
 ## Setup for Development
 
 ```bash
-poetry install
+uv sync                # create .venv with the dev dependency group
+uv run pytest          # run the tests on the default interpreter
+uv run nox             # run the tests on every supported Python version
+uv build               # build the sdist and wheel into dist/
 ```
