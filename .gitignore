@@ -49,3 +49,4 @@ docs/_build/*
 _build/
 public/
 .uv-cache/
+.mise/

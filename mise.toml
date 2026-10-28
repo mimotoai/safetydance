@@ -1,0 +1,5 @@
+# Tools only: Python packages stay in uv's dependency groups (pyproject.toml).
+# Node is needed by the Jupyter Book 2 site build.
+[tools]
+node = "22"
+uv = "0.9.0"

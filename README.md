@@ -87,3 +87,12 @@ uv run pytest          # run the tests on the default interpreter
 uv run nox             # run the tests on every supported Python version
 uv build               # build the sdist and wheel into dist/
 ```
+
+The docs need Node, which [mise](https://mise.jdx.dev) installs with the pinned uv
+(see `mise.toml`). The guide builds into `docs/_build/html`, the API reference into
+`docs/_build/html/api`:
+
+```bash
+mise install                          # install the pinned Node and uv
+mise exec -- uv run --locked nox -s docs
+```

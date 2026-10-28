@@ -1,0 +1,17 @@
+version: 1
+project:
+  title: safetydance
+  description: Type-safe, composable steps that share an execution context.
+  authors:
+    - name: David Charboneau
+  license: MIT
+  # BASE_URL prefixes assets and inline links but not TOC `url:` entries, so
+  # these carry the full GitLab Pages path.
+  toc:
+    - file: index.md
+    - title: API reference
+      url: /safetydance/api/
+site:
+  template: book-theme
+  options:
+    logo: logo-safetydance.svg

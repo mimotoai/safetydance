@@ -1,15 +1,15 @@
 # Pipelines run for merge requests and for the default branch only (no
-# duplicate branch + MR pipelines). `test`, `typecheck` and `package` run in
-# both and `version-check` in merge requests; `publish` deploys, so it runs only
-# on the default branch.
+# duplicate branch + MR pipelines). `test`, `typecheck`, `package` and `docs`
+# run in both and `version-check` in merge requests; `publish` (PyPI) and
+# `pages` (the docs site) deploy, so they run only on the default branch.
 #
 # Releasing: a merge request that changes the package sets the version to
 # release (`uv version --bump minor`, `uv version 1.0.0`); merging it publishes
 # that version. See scripts/release.py.
 #
-# Stage ordering (rather than `needs:`) makes the deploy job wait for the whole
-# test stage: with stages, a deploy job starts only after every job of the
-# earlier stage has succeeded.
+# Stage ordering (rather than `needs:`) makes `publish` wait for the whole test
+# stage: with stages, a deploy job starts only after every job of the earlier
+# stage has succeeded. `pages` needs only `docs`, whose output it deploys.
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -24,7 +24,7 @@ variables:
 
 default:
   image: ghcr.io/astral-sh/uv:0.9.0-python3.12-bookworm
-  cache:
+  cache: &uv-cache
     key:
       files:
         - uv.lock
@@ -67,6 +67,36 @@ package:
     - |
       expected="$(uv version --short)"
       EXPECTED="$expected" build/wheel-venv/bin/python -c 'import os, pathlib, safetydance; assert safetydance.__version__ == os.environ["EXPECTED"], safetydance.__version__; assert (pathlib.Path(safetydance.__file__).parent / "py.typed").is_file()'
+
+# The guide (Jupyter Book 2, code cells executed) and the API reference
+# (Sphinx) are built separately and published together: the API at
+# /safetydance/api/. Node and uv come from mise.toml. `--strict` fails the build
+# on a failing cell. The image runs as root, which Jupyter refuses by default.
+# The theme server listens on IPv6 loopback only, so the static export is
+# pointed at 127.0.0.1 explicitly.
+docs:
+  stage: test
+  variables:
+    MISE_DATA_DIR: $CI_PROJECT_DIR/.mise
+  cache:
+    - *uv-cache
+    - key:
+        files:
+          - mise.toml
+      paths:
+        - .mise
+  script:
+    - curl -fsSL https://mise.run | MISE_VERSION=v2026.10.21 MISE_INSTALL_PATH=/usr/local/bin/mise sh
+    - mise install
+    - mkdir -p ~/.jupyter
+    - echo "c.ServerApp.allow_root = True" > ~/.jupyter/jupyter_server_config.py
+    - cd docs
+    - HOST=127.0.0.1 BASE_URL=/safetydance mise exec -- uv run --locked --no-default-groups --group docs jupyter-book build --html --execute --strict --ci --keep-host
+    - cd ..
+    - uv run --locked --no-default-groups --group docs sphinx-build -W --keep-going -b html docs/api docs/_build/html/api
+  artifacts:
+    paths:
+      - docs/_build/html
 
 # A merge request that changes the package (src/safetydance/, or the published
 # parts of pyproject.toml) must raise the version above the target branch's and
@@ -115,5 +145,18 @@ publish:
   artifacts:
     paths:
       - dist
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# GitLab Pages publishes the `public` artifact of the job named `pages`.
+pages:
+  stage: deploy
+  needs: [docs]
+  cache: []
+  script:
+    - mv docs/_build/html public
+  artifacts:
+    paths:
+      - public
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
