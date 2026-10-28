@@ -1,4 +1,5 @@
 import logging
+import sys
 import threading
 from collections.abc import MutableMapping
 from functools import wraps
@@ -6,6 +7,16 @@ from inspect import currentframe
 from logging import Logger
 from types import FrameType
 from typing import Any, Callable, Generic, TypeVar
+
+if sys.version_info >= (3, 14):
+    from annotationlib import Format, get_annotations
+
+    def _own_annotations(cls: type) -> dict:
+        # Annotations are lazy on 3.14+; FORWARDREF tolerates names defined later.
+        return get_annotations(cls, format=Format.FORWARDREF)
+
+else:
+    from inspect import get_annotations as _own_annotations
 
 
 T = TypeVar("T")
@@ -253,17 +264,18 @@ class ContextPropertyDescriptor:
 
 class ContextData(type):
     def __new__(cls, name, bases, namespace):
-        type_hints = namespace["__annotations__"]
-        new_namespace = dict(namespace)
-        context_datas = []
-        for field_name, type_hint in type_hints.items():
+        # Annotations are read from the finished class: on 3.14+ the namespace holds
+        # a lazy __annotate__ function rather than an __annotations__ dict.
+        ret = super().__new__(cls, name, bases, namespace)
+        for field_name, type_hint in _own_annotations(ret).items():
             initializer = namespace.get(field_name, None)
-            context_data = ContextProperty[type_hint](field_name, initializer=initializer)
-            new_namespace[field_name] = ContextPropertyDescriptor(field_name, context_data)
-            context_datas.append(context_data)
-        ret = super().__new__(cls, name, bases, new_namespace)
-        for context_data in context_datas:
-            context_data.declaring_cls = ret
+            context_data = ContextProperty[type_hint](
+                field_name, initializer=initializer, declaring_cls=ret
+            )
+            # Bypass ContextData.__setattr__, which would route to the descriptor.
+            type.__setattr__(
+                ret, field_name, ContextPropertyDescriptor(field_name, context_data)
+            )
         return ret
 
     def __setattr__(self, name, value):
@@ -290,12 +302,11 @@ def context_data(cls):
     # Create a new namespace dictionary from the class's __dict__
     namespace = {}
     for key, value in cls.__dict__.items():
-        if key != "__dict__" and key != "__weakref__":
+        if key not in ("__dict__", "__weakref__", "__annotate_func__", "__annotations_cache__"):
             namespace[key] = value
 
-    # Ensure __annotations__ is preserved
-    if not hasattr(cls, "__annotations__"):
-        namespace["__annotations__"] = {}
+    # Carry the annotations over explicitly (3.14+ stores them lazily)
+    namespace["__annotations__"] = _own_annotations(cls)
 
     # Create a new class with the same name, bases, and namespace, but with ContextData as metaclass
     return ContextData(cls.__name__, cls.__bases__, namespace)

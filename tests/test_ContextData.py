@@ -1,4 +1,5 @@
 import logging
+import sys
 from dataclasses import dataclass
 
 import pytest
@@ -273,3 +274,23 @@ def test_fixture_binds_to_context_data_field_by_name():
         assert Invoice.total == total
 
     uses_fixture(total=5.0)
+
+
+@context
+def test_subclass_without_annotations_inherits_fields():
+    class Child(Order):
+        pass
+
+    Child.total = 3.0
+    assert Child.total == 3.0
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="lazy annotations")
+@context
+def test_forward_reference_annotation_is_allowed():
+    @context_data
+    class Pending:
+        later: DefinedAfterTheClass
+
+    Pending.later = "value"
+    assert Pending.later == "value"
