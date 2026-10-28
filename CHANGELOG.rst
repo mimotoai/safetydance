@@ -23,7 +23,11 @@ v0.5.0
   back. One broken plugin's ``ImportError`` surfaces from lookups until it is
   fixed.
 * A step's identity covers its definition location, wrapper chain and default
-  and captured values, compared so that a module imported twice is one step.
+  and captured values. Module-level functions and classes in a default or
+  captured value are compared by file and name, so a module imported twice is
+  one step unless a value compares by identity (an ``object()`` sentinel, an
+  instance, a ``functools.partial`` or an ``Enum`` member), when each copy is a
+  different step and its bare name is ambiguous.
   Error messages suggest a full module path only when it can be typed.
 * ``StepNotFound`` and ``AmbiguousStep`` are sibling ``AttributeError`` s
   (neither is a kind of the other) that report a missing name or one that could

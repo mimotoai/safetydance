@@ -144,15 +144,26 @@ their code and captured values, bound methods by their instance, and other
 callables (classes, instances) by object identity.
 
 Default and captured values are compared so that a module imported twice
-still gives one step. Classes and functions are compared by where they are
-defined, and a value bound to a module global (a sentinel, a module-level
-instance) by that global's name. Everything else compares by value, and equal
-values of different types, such as `1` and `True` or `(1,)` and `(1.0,)`, stay
-distinct. A value that matches none of these falls back to object identity;
-an enum member from a module imported twice is an example, so a step with
-one as a default is ambiguous with its double. Closures made by one factory
-that capture different values are distinct steps, so their bare names and full
-paths are ambiguous: register them explicitly, or give each a short namespace.
+still gives one step, where that can be done safely:
+
+* a module-level function that is not a lambda is recognised by its module
+  file and qualified name;
+* a lambda or a function defined inside another is recognised by its code,
+  defaults and captured values;
+* a module-level class whose module has a real file is recognised by that file
+  and its qualified name; a local class, or one from exec'd code, by object
+  identity;
+* any other hashable value compares by type and value, so `1` and `True`, or
+  `(1,)` and `(1.0,)`, stay distinct; anything else by object identity.
+
+So when a step module is imported twice, a step whose default or captured
+value is an `object()` sentinel, an instance, a `functools.partial` or an
+`Enum` member is a different step in each copy, and its bare name and short
+namespace path raise `AmbiguousStep`. Fix that by not importing the module
+twice (check pytest's rootdir and import mode), or by giving the copies
+distinct namespaces. Closures made by one factory that capture different
+values are distinct steps too, so their bare names and full paths are
+ambiguous: register them explicitly, or give each a short namespace.
 
 Defining a step again at a different line, as reloading a module or re-running
 an edited notebook cell does, leaves the old one registered, so the name
