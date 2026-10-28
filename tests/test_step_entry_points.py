@@ -2,6 +2,7 @@ import importlib
 import importlib.metadata
 import sys
 import threading
+import types
 
 import pytest
 
@@ -722,3 +723,79 @@ def test_failed_load_removes_a_step_it_registered_and_re_registered(installed, t
     assert not any(g is get for registered in default.values() for g in registered.values())
     assert not any(bound is get for _, bound in explicit.values())
     assert (explicit, default, children) == ({}, {}, {})
+
+
+def make_rebindable_step():
+    box = object()
+
+    def get():
+        return box
+
+    def rebind():
+        nonlocal box
+        box = object()
+
+    return get, rebind
+
+
+REGISTER = {"default": "step(f)", "explicit": "register_steps(f, namespace='chosen')"}
+
+
+def run_module(name, source, env, monkeypatch=None):
+    """Exec ``source`` as module ``name``; it stays imported when ``monkeypatch`` is given."""
+    module = types.ModuleType(name)
+    module.__dict__.update(env, step=step, register_steps=register_steps, Given=Given)
+    if monkeypatch is not None:
+        monkeypatch.setitem(sys.modules, name, module)
+    exec(compile(source, f"{name}.py", "exec"), module.__dict__)
+
+
+def paths_holding(f):
+    explicit, default, _ = registry_state()
+    held = [p for p, registered in default.items() if any(g is f for g in registered.values())]
+    return held + [p for p, (_, bound) in explicit.items() if bound is f]
+
+
+@pytest.mark.parametrize("tier", ["default", "explicit"])
+def test_failed_load_keeps_a_step_an_imported_module_registered_in_it(installed, monkeypatch, tier):
+    # In one load, sd_ep_ok registers f and stays imported; sd_ep_bad then rebinds
+    # f's value, registers f again and fails. sd_ep_ok will never run again, so f
+    # must stay: the re-registration is still sd_ep_ok's record, not sd_ep_bad's.
+    f, rebind = make_rebindable_step()
+    env = {"f": f, "rebind": rebind}
+
+    def load():
+        run_module("sd_ep_ok", REGISTER[tier] + "\n", env, monkeypatch)
+        run_module("sd_ep_bad", f"rebind()\n{REGISTER[tier]}\nraise RuntimeError('boom')\n", env)
+
+    installed.entry_points[:] = [FakeEntryPoint("mixed", load)]
+    with pytest.raises(RuntimeError, match="boom"):
+        Given.get
+    assert paths_holding(f) == (
+        [tuple(f.__module__.split(".")) + ("get",), ("get",)]
+        if tier == "default"
+        else [("chosen", "get")]
+    )
+
+
+@pytest.mark.parametrize("tier", ["default", "explicit"])
+def test_failed_nested_load_that_re_registers_a_step_rolls_it_back(installed, tier):
+    # Entry point a's module registers f, then a lookup loads entry point b, whose
+    # module rebinds f's value, registers f again and fails, so a fails too. f was
+    # recorded by a's load, which must remove it under its new key.
+    f, rebind = make_rebindable_step()
+    env = {"f": f, "rebind": rebind}
+
+    def load_a():
+        run_module("sd_ep_a_mod", f"{REGISTER[tier]}\nGiven.anything\n", env)
+
+    def load_b():
+        run_module("sd_ep_b_mod", f"rebind()\n{REGISTER[tier]}\nraise RuntimeError('b fails')\n", env)
+
+    a, b = FakeEntryPoint("a", load_a), FakeEntryPoint("b", load_b)
+    installed.entry_points[:] = [a, b]
+    with pytest.raises(RuntimeError, match="b fails"):
+        Given.get
+    assert paths_holding(f) == []
+    assert registry_state() == ({}, {}, {})
+    assert (a.loads, b.loads) == (1, 1)

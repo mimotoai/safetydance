@@ -295,13 +295,18 @@ class _Registry:
         if journals:
             journals[-1].append((tier, path, key, module))
 
-    def _recorded(self, tier: str, path: _Path, keys: list[_Key]) -> bool:
-        """Whether the current load registered one of ``keys`` at ``path``."""
-        journals = self._journals()
-        return bool(journals) and any(
-            record[0] == tier and record[1] == path and record[2] in keys
-            for record in journals[-1]
-        )
+    def _rekey(self, tier: str, path: _Path, stale: list[_Key], key: _Key) -> None:
+        """
+        Move the record of an entry replaced under a new ``key`` to that key.
+
+        Whichever open load recorded it keeps it, with the module that made it, so
+        the step is rolled back exactly when it would have been. An entry no load
+        recorded predates them all, and stays unrecorded.
+        """
+        for journal in self._journals():
+            for i, (t, p, k, module) in enumerate(journal):
+                if t == tier and p == path and k in stale:
+                    journal[i] = (t, p, key, module)
 
     def _importer(self) -> str | None:
         """
@@ -340,12 +345,11 @@ class _Registry:
                 stale = [k for k, g in registered.items() if g is f and k != key]
                 for old in stale:
                     del registered[old]
-                # A replaced entry made before this load must survive its rollback;
-                # one made during it goes, under its new key. As in the explicit tier.
-                if key not in registered and (
-                    not stale or self._recorded("default", path, stale)
-                ):
-                    self._record("default", path, key, importer)
+                if key not in registered:
+                    if stale:
+                        self._rekey("default", path, stale, key)
+                    else:
+                        self._record("default", path, key, importer)
                 # The same step registered again replaces the stored object.
                 registered[key] = f
                 self._add_prefixes(path)
@@ -362,12 +366,12 @@ class _Registry:
                 self._check_explicit(path, items)
             for path, items in bindings.items():
                 existing = self._explicit.get(path)
-                if existing is None or (
-                    existing[0] != items[-1][0]
-                    and self._recorded("explicit", path, [existing[0]])
-                ):
+                if existing is None:
                     module = importer or items[-1][1].__module__
                     self._record("explicit", path, items[-1][0], module)
+                elif existing[0] != items[-1][0]:
+                    # The same object, bound again under a new key.
+                    self._rekey("explicit", path, [existing[0]], items[-1][0])
                 self._explicit[path] = items[-1]
                 self._add_prefixes(path)
 
