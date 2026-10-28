@@ -1,5 +1,6 @@
 import keyword
 import threading
+from inspect import unwrap
 from types import MethodType
 from typing import Any, Callable, TypeVar
 
@@ -47,7 +48,8 @@ def _same(a: Any, b: Any) -> bool:
 
 
 def _code(f: Any) -> Any:
-    return getattr(getattr(f, "__func__", f), "__code__", None)
+    # Unwrap decorators, so a shared ``functools.wraps`` wrapper does not stand for the step.
+    return getattr(unwrap(getattr(f, "__func__", f)), "__code__", None)
 
 
 def _describe(f: Any) -> str:
@@ -59,6 +61,8 @@ def _describe(f: Any) -> str:
 
 def _hint(a: Any, b: Any) -> str:
     if type(a) is MethodType and type(b) is MethodType and a.__func__ is b.__func__:
+        if a.__self__ is b.__self__:
+            return ""
         return "; a method of a different instance"
     # The same source file imported under two names registers two copies of a step.
     where = [(c.co_filename, c.co_firstlineno) for c in (_code(a), _code(b)) if c]
@@ -82,6 +86,8 @@ def _segment(name: str, what: str) -> str:
 def _prefix(namespace: str | None) -> _Path:
     if namespace is None:
         return ()
+    if not isinstance(namespace, str):
+        raise TypeError(f"a namespace must be a str, not {type(namespace).__name__}")
     return tuple(_segment(part, "namespace segment") for part in namespace.split("."))
 
 
@@ -104,36 +110,35 @@ class _Registry:
         self._bindings: dict[_Path, Callable[..., Any]] = {}
         self._children: dict[_Path, set[str]] = {}
 
-    def _clash(self, path: _Path, f: Any, pending: dict[_Path, Any]):
-        """Why ``f`` cannot be bound at ``path``, as (reason, other step), or None."""
+    def _clash(self, prefix: _Path, name: str, f: Any, pending: dict[_Path, Any]):
+        """Why ``f`` cannot be bound at ``prefix + (name,)``, as (reason, other), or None."""
+        path = (*prefix, name)
         taken = self._bindings.get(path, pending.get(path))
         if taken is not None and not _same(f, taken):
             return f"'{_dotted(path)}' is already bound to", taken
+        # A binding above the path is in ``_bindings``: one call binds one prefix.
         for i in range(1, len(path)):
-            above = self._bindings.get(path[:i], pending.get(path[:i]))
+            above = self._bindings.get(path[:i])
             if above is not None:
                 return f"'{_dotted(path[:i])}' is the step", above
-        below = next((p for p in pending if p[: len(path)] == path and p != path), None)
-        if below is None and path in self._children:
+        if path in self._children:
             below = path
             while below not in self._bindings:
                 below += (min(self._children[below]),)
-        if below is not None:
-            other = self._bindings.get(below, pending.get(below))
-            return f"'{_dotted(path)}' is a namespace holding", other
+            return f"'{_dotted(path)}' is a namespace holding", self._bindings[below]
         return None
 
-    def bind(self, paths_and_steps: list[tuple[_Path, Callable[..., Any]]]) -> None:
-        """Bind every step or none of them; raises ``ValueError`` on a conflict."""
+    def bind(self, prefix: _Path, steps: list[tuple[str, Callable[..., Any]]]) -> None:
+        """Bind every step under ``prefix`` or none; raises ``ValueError`` on a conflict."""
         pending: dict[_Path, Any] = {}
         bad = None
         with self._lock:
-            for path, f in paths_and_steps:
-                clash = self._clash(path, f, pending)
+            for name, f in steps:
+                clash = self._clash(prefix, name, f, pending)
                 if clash:
-                    bad = (path, f, *clash)
+                    bad = ((*prefix, name), f, *clash)
                     break
-                pending.setdefault(path, f)
+                pending.setdefault((*prefix, name), f)
             else:
                 for path, f in pending.items():
                     if path not in self._bindings:
@@ -244,7 +249,7 @@ class _StepNamespace:
 
 
 def _bind(steps: tuple[Callable[..., Any], ...], prefix: _Path) -> None:
-    _registry.bind([((*prefix, _step_name(f)), f) for f in steps])
+    _registry.bind(prefix, [(_step_name(f), f) for f in steps])
 
 
 def step(f: F) -> F:
@@ -270,6 +275,8 @@ def step_namespace(namespace: str) -> Callable[[F], F]:
     if a segment is not a public identifier. The decorated function is returned
     unchanged.
     """
+    if namespace is None:
+        raise TypeError("a namespace must be a str, not NoneType")
     prefix = _prefix(namespace)
 
     def decorator(f: F) -> F:

@@ -374,3 +374,80 @@ def test_concurrent_conflicts_are_detected_exactly_once():
     targets = [lambda i=i: register_steps(make_step(f"m{i}", "same")) for i in range(8)]
     assert len(_run_threads(targets)) == 7
     assert callable(Given.same)
+
+
+def test_same_instance_at_a_second_path_is_not_a_different_instance():
+    c = Pinger()
+    register_steps(c.ping)
+    register_steps(c.ping, namespace="ping2")
+    register_steps(Pinger().ping, namespace="ping3")
+    with pytest.raises(ValueError) as info:
+        register_steps(Pinger().ping, namespace="ping3")
+    assert "different instance" in str(info.value)
+    with pytest.raises(ValueError) as info:
+        register_steps(Pinger().ping.__func__, namespace="ping2")
+    assert "different instance" not in str(info.value)
+
+
+def _retry(f):
+    @functools.wraps(f)
+    def wrapper(*a, **k):
+        return f(*a, **k)
+
+    return wrapper
+
+
+def _wrapped_step(module, name):
+    f = make_step(module, name)
+    f.__code__ = f.__code__.replace(co_filename=f"/{module}/steps.py")
+    return _retry(f)
+
+
+def test_shared_wrapper_does_not_cause_a_false_double_import_hint():
+    a, b = _wrapped_step("liba.steps", "fetch"), _wrapped_step("libb.steps", "fetch")
+    register_steps(a)
+    with pytest.raises(ValueError) as info:
+        register_steps(b)
+    assert "imported twice" not in str(info.value)
+    assert "/liba.steps/steps.py" in str(info.value)  # the step, not the wrapper
+
+
+def test_wrapped_double_import_still_gets_the_hint():
+    a = make_step("p.steps", "fetch")
+    b = make_step("q.p.steps", "fetch")
+    for f in (a, b):
+        f.__code__ = f.__code__.replace(co_filename="/same/steps.py")
+    register_steps(_retry(a))
+    with pytest.raises(ValueError, match="imported twice"):
+        register_steps(_retry(b))
+
+
+@pytest.mark.parametrize("bad", [3, None, b"x"])
+def test_non_str_namespaces_raise_type_error(bad):
+    with pytest.raises(TypeError):
+        step_namespace(bad)
+    if bad is not None:
+        with pytest.raises(TypeError):
+            register_steps(make_step("m", "get"), namespace=bad)
+
+
+def test_namespace_none_in_register_steps_means_bare():
+    f = make_step("m", "get")
+    register_steps(f, namespace=None)
+    assert Given.get is f
+
+
+def test_multi_level_namespace_clash_names_the_nested_step():
+    step_namespace("my.pkg")(make_step("m1", "get"))
+    with pytest.raises(ValueError, match=r"'my' is a namespace holding m1\.get"):
+        step(make_step("m2", "my"))
+
+
+def test_mock_patch_object_on_a_prefix_fails_without_touching_the_registry():
+    from unittest import mock
+
+    register_steps(make_step("m", "get"))
+    with pytest.raises(AttributeError):
+        with mock.patch.object(Given, "x", 1):
+            pass
+    assert dir(Given) == ["get"]
