@@ -2,7 +2,7 @@ import keyword
 import sys
 import threading
 from importlib.metadata import entry_points
-from inspect import ismethod
+from inspect import currentframe, ismethod
 from types import CodeType, FunctionType
 from typing import Any, Callable, Iterable, TypeVar
 
@@ -26,8 +26,8 @@ ENTRY_POINT_GROUP = "safetydance.steps"
 
 _Path = tuple[str, ...]
 _Key = tuple[Any, ...]
-# One registration, (tier, path, key, step module), as recorded while an entry
-# point loads.
+# One registration, (tier, path, key, module), as recorded while an entry point
+# loads; the module is the one whose import made the registration.
 _Record = tuple[str, _Path, _Key, str]
 
 
@@ -243,17 +243,37 @@ class _Registry:
         if journals:
             journals[-1].append((tier, path, key, module))
 
+    def _importer(self) -> str | None:
+        """
+        The module whose import is registering steps, while an entry point loads.
+
+        That is the nearest module-level frame above the caller and below this
+        thread's innermost load. A failing module often registers steps defined
+        elsewhere, such as a library's bound method or factory closure.
+        """
+        if not self._journals():
+            return None
+        frame = currentframe()
+        while frame is not None and frame.f_code is not _LOAD_CODE:
+            if frame.f_code.co_name == "<module>":
+                name = frame.f_globals.get("__name__")
+                if isinstance(name, str):
+                    return name
+            frame = frame.f_back
+        return None
+
     def add_default(self, f: Callable[..., Any], namespace: _Path | None) -> None:
         name = _step_name(f)
         key = _step_key(f)
         paths = [_full_path(f), (name,)]
         if namespace is not None:
             paths.append((*namespace, name))
+        importer = self._importer() or f.__module__
         with self._lock:
             for path in paths:
                 registered = self._default.setdefault(path, {})
                 if key not in registered:
-                    self._record("default", path, key, f.__module__)
+                    self._record("default", path, key, importer)
                 # The same step registered again replaces the stored object.
                 registered[key] = f
                 self._add_prefixes(path)
@@ -263,13 +283,15 @@ class _Registry:
         for f in steps:
             path = (*namespace, _step_name(f))
             bindings.setdefault(path, []).append((_step_key(f), f))
+        importer = self._importer()
         with self._lock:
             # Check every conflict before binding anything, so a failure binds nothing.
             for path, items in bindings.items():
                 self._check_explicit(path, items)
             for path, items in bindings.items():
                 if path not in self._explicit:
-                    self._record("explicit", path, items[-1][0], items[-1][1].__module__)
+                    module = importer or items[-1][1].__module__
+                    self._record("explicit", path, items[-1][0], module)
                 self._explicit[path] = items[-1]
                 self._add_prefixes(path)
 
@@ -310,7 +332,7 @@ class _Registry:
         with self._lock:
             for tier, path, key, module in records:
                 # A module that imported along the way stays imported, so a retry
-                # would not register its steps again; only failed modules' steps go.
+                # would not register its steps again; only failed modules' go.
                 if module in sys.modules:
                     continue
                 if tier == "explicit":
@@ -603,5 +625,8 @@ def unregister_steps(*steps: Callable[..., object]) -> None:
 
 
 Given = When = Then = And = StepPrefix()
+
+# Where _Registry._importer stops walking up: the frame of the innermost load.
+_LOAD_CODE = _Registry._load.__code__
 
 _registry: _Registry = _Registry()

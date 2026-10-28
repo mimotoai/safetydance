@@ -575,3 +575,76 @@ def test_circular_lookups_during_loads_do_not_deadlock(add_entry_point):
     assert sys.modules["sd_ep_a"].B == "b"
     assert sys.modules["sd_ep_b"].A == "a"
     assert (a.loads, b.loads) == (1, 1)
+
+
+FACTORY_SOURCE = """\
+class Client:
+    def get(self):
+        return "client"
+
+
+def make():
+    items = []
+
+    def fetch():
+        return items
+
+    return fetch
+"""
+
+FLAKY_LIBRARY_USER_SOURCE = """\
+import os
+from safetydance import register_steps, step_namespace
+from sd_ep_factory import Client, make
+
+client = Client()
+register_steps(client.get, namespace="api")
+step_namespace("fac")(make())
+if not os.path.exists({marker!r}):
+    raise ImportError("transient")
+"""
+
+
+def test_retry_after_a_failed_load_that_registered_library_steps(
+    installed, add_entry_point, tmp_path
+):
+    # The failing module registers a bound method and a factory closure whose
+    # __module__ is a library that imported fine; both belong to the failed import.
+    (tmp_path / "sd_ep_factory.py").write_text(FACTORY_SOURCE)
+    marker = tmp_path / "library-user-may-load"
+    installed.entry_points.clear()
+    user = add_entry_point(
+        "user", "sd_ep_library_user", FLAKY_LIBRARY_USER_SOURCE.format(marker=str(marker))
+    )
+    try:
+        with pytest.raises(ImportError, match="transient"):
+            Given.api
+        assert "sd_ep_factory" in sys.modules
+        assert registry_state() == ({}, {}, {})
+        marker.touch()
+        # Without attributing them to the failed module, the retry's new objects
+        # would conflict with the first attempt's ("already registered").
+        assert Given.api.get() == "client"
+        assert Given.fac.fetch() == []
+        assert Given.fetch is Given.fac.fetch
+        assert user.loads == 2
+    finally:
+        sys.modules.pop("sd_ep_factory", None)
+
+
+def test_registration_outside_a_load_walks_no_frames(monkeypatch):
+    # A lookup or plain registration never inspects the stack.
+    monkeypatch.setattr(_steps, "_registry", _steps._Registry(read_entry_points=lambda: ()))
+
+    def no_frames():
+        raise AssertionError("walked the stack outside a load")
+
+    monkeypatch.setattr(_steps, "currentframe", no_frames)
+
+    @step_namespace("plain")
+    def ping():
+        return "plain"
+
+    register_steps(ping, namespace="bound")
+    assert Given.plain.ping() == "plain"
+    assert Given.bound.ping() == "plain"
