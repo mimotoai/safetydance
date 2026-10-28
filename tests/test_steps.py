@@ -251,8 +251,35 @@ def test_bound_method_registered_twice_is_a_no_op():
 
 def test_bound_methods_of_two_instances_conflict():
     register_steps(Pinger().ping)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="a method of a different instance"):
         register_steps(Pinger().ping)
+
+
+def test_unregister_bound_method_with_a_fresh_access_frees_the_paths():
+    c = Pinger()
+    register_steps(c.ping)
+    register_steps(c.ping, namespace="api")
+    unregister_steps(c.ping)
+    assert "ping" not in dir(Given)
+    assert "api" not in dir(Given)
+    register_steps(Pinger().ping)
+
+
+def test_unregister_a_method_of_another_instance_leaves_the_bound_one():
+    c, d = Pinger(), Pinger()
+    register_steps(c.ping)
+    unregister_steps(d.ping)
+    assert Given.ping == c.ping
+
+
+def test_a_sibling_survives_a_partial_prune():
+    get, put = make_step("m", "get"), make_step("m", "put")
+    register_steps(get, put, namespace="http")
+    unregister_steps(get)
+    assert Given.http.put is put
+    assert dir(Given.http) == ["put"]
+    with pytest.raises(StepNotFound):
+        Given.http.get
 
 
 def test_unregister_frees_every_path():
@@ -334,6 +361,8 @@ def test_concurrent_registration():
         ]
 
     assert _run_threads([worker(i) for i in range(8)]) == []
+    assert dir(Given) == sorted(f"ns{i}" for i in range(8))
+    assert all(dir(getattr(Given, f"ns{i}")) == sorted(f"s{n}" for n in range(50)) for i in range(8))
     assert all(
         getattr(getattr(Given, f"ns{i}"), f"s{n}")() is None
         for i in range(8)

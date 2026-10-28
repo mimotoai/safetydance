@@ -8,7 +8,6 @@ def test_star_import_exports_only_the_public_api():
     namespace.pop("__builtins__")
     assert set(namespace) == {
         "And",
-        "AmbiguousStep",
         "Given",
         "StepNotFound",
         "StepPrefix",
@@ -48,7 +47,7 @@ def test_importing_test_context_does_not_add_a_pytest_test(pytester):
 
 def test_star_import_brings_prefixes(pytester, monkeypatch):
     # pytester runs in this process, so give its steps a registry of their own.
-    monkeypatch.setattr(_steps, "_registry", _steps._Registry(read_entry_points=lambda: ()))
+    monkeypatch.setattr(_steps, "_registry", _steps._Registry())
     pytester.makepyfile(
         """
         from safetydance import *

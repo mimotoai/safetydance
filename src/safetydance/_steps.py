@@ -1,6 +1,6 @@
 import keyword
 import threading
-from inspect import ismethod
+from types import MethodType
 from typing import Any, Callable, TypeVar
 
 __all__ = [
@@ -37,8 +37,12 @@ def _dotted(path: _Path) -> str:
 
 def _same(a: Any, b: Any) -> bool:
     # ``obj.m`` makes a new bound method on every access, so compare its parts.
+    # ``type(...) is`` avoids running a user-defined ``__class__`` under the lock.
     return a is b or (
-        ismethod(a) and ismethod(b) and a.__self__ is b.__self__ and a.__func__ is b.__func__
+        type(a) is MethodType
+        and type(b) is MethodType
+        and a.__self__ is b.__self__
+        and a.__func__ is b.__func__
     )
 
 
@@ -53,7 +57,9 @@ def _describe(f: Any) -> str:
     return f"{getattr(f, '__module__', '?')}.{name} ({where})"
 
 
-def _twice_hint(a: Any, b: Any) -> str:
+def _hint(a: Any, b: Any) -> str:
+    if type(a) is MethodType and type(b) is MethodType and a.__func__ is b.__func__:
+        return "; a method of a different instance"
     # The same source file imported under two names registers two copies of a step.
     where = [(c.co_filename, c.co_firstlineno) for c in (_code(a), _code(b)) if c]
     mods = getattr(a, "__module__", None), getattr(b, "__module__", None)
@@ -71,6 +77,12 @@ def _segment(name: str, what: str) -> str:
             f"{what} {name!r} must be a public identifier, not a keyword or _-prefixed"
         )
     return name
+
+
+def _prefix(namespace: str | None) -> _Path:
+    if namespace is None:
+        return ()
+    return tuple(_segment(part, "namespace segment") for part in namespace.split("."))
 
 
 def _step_name(f: Any) -> str:
@@ -132,7 +144,7 @@ class _Registry:
             path, f, reason, other = bad
             raise ValueError(
                 f"{reason} {_describe(other)}; cannot register "
-                f"{_describe(f)} at '{_dotted(path)}'{_twice_hint(other, f)}"
+                f"{_describe(f)} at '{_dotted(path)}'{_hint(other, f)}"
             )
 
     def unbind(self, steps: tuple[Callable[..., Any], ...]) -> None:
@@ -231,6 +243,10 @@ class _StepNamespace:
         return f"<step namespace '{_dotted(self.__sd_path__)}'>"
 
 
+def _bind(steps: tuple[Callable[..., Any], ...], prefix: _Path) -> None:
+    _registry.bind([((*prefix, _step_name(f)), f) for f in steps])
+
+
 def step(f: F) -> F:
     """
     Register ``f`` under its own name and return it unchanged.
@@ -240,7 +256,7 @@ def step(f: F) -> F:
     nothing is replaced. Raises ``TypeError`` if ``f`` is not callable or has no
     ``__name__``, and ``ValueError`` if its name is not a public identifier.
     """
-    _registry.bind([((_step_name(f),), f)])
+    _bind((f,), ())
     return f
 
 
@@ -254,10 +270,10 @@ def step_namespace(namespace: str) -> Callable[[F], F]:
     if a segment is not a public identifier. The decorated function is returned
     unchanged.
     """
-    prefix = tuple(_segment(part, "namespace segment") for part in namespace.split("."))
+    prefix = _prefix(namespace)
 
     def decorator(f: F) -> F:
-        _registry.bind([((*prefix, _step_name(f)), f)])
+        _bind((f,), prefix)
         return f
 
     return decorator
@@ -277,10 +293,7 @@ def register_steps(*steps: Callable[..., object], namespace: str | None = None) 
     """
     if not steps:
         raise TypeError("register_steps() needs at least one step")
-    prefix: _Path = ()
-    if namespace is not None:
-        prefix = tuple(_segment(part, "namespace segment") for part in namespace.split("."))
-    _registry.bind([((*prefix, _step_name(f)), f) for f in steps])
+    _bind(steps, _prefix(namespace))
 
 
 def unregister_steps(*steps: Callable[..., object]) -> None:
