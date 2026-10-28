@@ -3,11 +3,13 @@ import copy
 import decimal
 import enum
 import functools
+import gc
 import importlib
 import inspect
 import sys
 import traceback
 import types
+import weakref
 
 import pytest
 
@@ -1371,3 +1373,145 @@ def test_tuples_holding_other_objects_are_keyed_by_identity():
     step_namespace("c")(make_returning(shared))
     step_namespace("d")(make_returning(shared))
     assert Given.c.get() is Given.d.get()
+
+
+# Identity keys hold their objects, and a step object is matched as itself.
+
+
+class Box:
+    """A weak-referenceable object for identity-keyed values."""
+
+
+def make_rebindable():
+    box = Box()
+
+    def get():
+        return box
+
+    def rebind():
+        nonlocal box
+        box = Box()
+
+    return get, rebind
+
+
+def make_with_default():
+    def get(x=Box()):
+        return x
+
+    return get
+
+
+def test_identity_keyed_value_stays_alive_while_registered():
+    get, rebind = make_rebindable()
+    old = weakref.ref(get.__closure__[0].cell_contents)
+    step(get)
+    rebind()
+    gc.collect()
+    # The key still holds the old object, so its address cannot be reused.
+    assert old() is not None
+    unregister_steps(get)
+    gc.collect()
+    assert old() is None
+
+
+def test_no_collapse_after_a_nonlocal_rebind_and_new_objects():
+    first, rebind = make_rebindable()
+    step_namespace("one")(first)
+    rebind()
+    gc.collect()
+    others = [make_rebindable()[0] for _ in range(1000)]
+    second = others[-1]
+    step_namespace("two")(second)
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    unregister_steps(second)
+    assert Given.one.get is first
+
+
+def test_no_collapse_after_reassigning_defaults_and_new_objects():
+    first = make_with_default()
+    step_namespace("one")(first)
+    first.__defaults__ = (Box(),)
+    gc.collect()
+    others = [make_with_default() for _ in range(1000)]
+    step_namespace("two")(others[-1])
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    unregister_steps(others[-1])
+    assert Given.one.get is first
+
+
+def test_unregister_after_a_nonlocal_rebind_removes_the_step():
+    get, rebind = make_rebindable()
+    step_namespace("x")(get)
+    register_steps(get, namespace="y")
+    rebind()
+    unregister_steps(get)
+    assert dir(Given) == []
+
+
+def test_unregister_after_reassigning_defaults_removes_the_step():
+    get = make_with_default()
+    step(get)
+    register_steps(get, namespace="y")
+    get.__defaults__ = (Box(),)
+    unregister_steps(get)
+    assert dir(Given) == []
+
+
+def test_registering_a_mutated_step_again_is_one_step():
+    get, rebind = make_rebindable()
+    step_namespace("x")(get)
+    register_steps(get, namespace="y")
+    rebind()
+    # Not ambiguous with itself, and not a conflicting explicit binding.
+    step_namespace("x")(get)
+    register_steps(get, namespace="y")
+    assert Given.get is get
+    assert Given.x.get is get
+    assert Given.y.get is get
+    registry = _steps._registry
+    assert len(registry._default[("get",)]) == 1
+
+
+class Touchy:
+    """An object whose __eq__ and __hash__ must never run."""
+
+    def __eq__(self, other):
+        raise AssertionError("__eq__ ran")
+
+    def __hash__(self):
+        raise AssertionError("__hash__ ran")
+
+
+def test_ref_never_runs_the_objects_eq_or_hash():
+    touchy = Touchy()
+    ref = _steps._Ref(touchy)
+    assert ref == _steps._Ref(touchy)
+    assert ref != _steps._Ref(Touchy())
+    assert ref != touchy
+    assert hash(ref) == id(touchy)
+    assert {ref: 1}[_steps._Ref(touchy)] == 1
+    step_namespace("a")(make_returning(touchy))
+    step_namespace("b")(make_returning(Touchy()))
+    step_namespace("c")(make_returning(touchy))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    assert Given.a.get() is touchy
+
+
+def test_identity_keyed_wrapped_layer_stays_alive_while_registered():
+    def fetcher():
+        return "fetched"
+
+    fetcher.__wrapped__ = Fetcher("inner")
+    inner = weakref.ref(fetcher.__wrapped__)
+    step(fetcher)
+    # Only the key refers to the callable-instance layer once __wrapped__ moves on.
+    fetcher.__wrapped__ = None
+    gc.collect()
+    assert inner() is not None
+    unregister_steps(fetcher)
+    gc.collect()
+    assert inner() is None

@@ -137,6 +137,23 @@ def _function_key(f: Any, wrapped: Any) -> _Key:
     )
 
 
+class _Ref:
+    """An identity key: holds ``obj`` alive and never runs its ``__eq__`` or ``__hash__``."""
+
+    # Held, not just its id, so the address cannot be freed and reused by another
+    # object that would then key equal.
+    __slots__ = ("obj",)
+
+    def __init__(self, obj: object):
+        self.obj = obj
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is _Ref and self.obj is other.obj
+
+    def __hash__(self) -> int:
+        return id(self.obj)
+
+
 # Exactly these types (not subclasses) compare equal across two imports of one
 # module without running user code; tuples and frozensets of them do too.
 _PLAIN_TYPES = (int, bool, float, complex, str, bytes, type(None))
@@ -172,22 +189,23 @@ def _value_key(value: Any) -> Any:
     silently merging two different steps.
     """
     key = _plain_key(value)
-    return ("<id>", id(value)) if key is None else key
+    return ("<id>", _Ref(value)) if key is None else key
 
 
 def _layer_key(layer: Any, wrapped: Any) -> _Key:
     if ismethod(layer):
         # A bound method forwards __code__, so methods of different instances share it.
-        return ("<method>", id(layer.__self__), _layer_key(layer.__func__, wrapped))
+        return ("<method>", _Ref(layer.__self__), _layer_key(layer.__func__, wrapped))
     if isinstance(getattr(layer, "__code__", None), CodeType):
         return _function_key(layer, wrapped)
-    return ("<object>", id(layer))
+    return ("<object>", _Ref(layer))
 
 
 def _step_key(f: Callable[..., Any]) -> _Key:
-    # Keyed by code, defaults and captured values rather than object identity, so
-    # one module imported under two names (e.g. through pytest's rootdir) is one
-    # step. Every wrapper in a functools.wraps chain counts.
+    # Keyed by each layer's code and by its defaults and captured values: builtins
+    # by value, so one module imported under two names (e.g. through pytest's
+    # rootdir) is one step, and anything else by identity. Every wrapper in a
+    # functools.wraps chain counts.
     layers = _layers(f)
     return tuple(
         _layer_key(layer, layers[i + 1] if i + 1 < len(layers) else None)
@@ -303,11 +321,15 @@ class _Registry:
         if namespace is not None:
             paths.append((*namespace, name))
         importer = self._importer() or f.__module__
-        # Dict lookups on keys run the __eq__ and __hash__ of defaults and captured
-        # values, user code included, under _lock.
+        # Keys hold only builtins, code objects and _Refs, so comparing them under
+        # _lock runs no user __eq__ or __hash__.
         with self._lock:
             for path in paths:
                 registered = self._default.setdefault(path, {})
+                # The same object under an older key (a default or captured value
+                # rebound since) is one step, not two.
+                for stale in [k for k, g in registered.items() if g is f and k != key]:
+                    del registered[stale]
                 if key not in registered:
                     self._record("default", path, key, importer)
                 # The same step registered again replaces the stored object.
@@ -320,7 +342,6 @@ class _Registry:
             path = (*namespace, _step_name(f))
             bindings.setdefault(path, []).append((_step_key(f), f))
         importer = self._importer()
-        # As in add_default, comparing keys runs user __eq__ and __hash__ under _lock.
         with self._lock:
             # Check every conflict before binding anything, so a failure binds nothing.
             for path, items in bindings.items():
@@ -345,23 +366,30 @@ class _Registry:
                 )
         first = self._explicit.get(path) or items[0]
         for key, f in items:
-            if key != first[0]:
+            # The same object is the same step, though a rebound value changed its key.
+            if key != first[0] and f is not first[1]:
                 raise ValueError(
                     f"'{_dotted(path)}' is already registered to "
                     f"{_full_name(first[1])}; cannot also register "
                     f"{_full_name(f)} there."
                 )
 
-    def remove(self, keys: set[_Key]) -> None:
+    def remove(self, steps: tuple[Callable[..., object], ...]) -> None:
+        keys = {_step_key(f) for f in steps}
+
+        def matches(key: _Key, stored: Callable[..., Any]) -> bool:
+            # By object too, so a step whose values were rebound since still goes.
+            return key in keys or any(stored is f for f in steps)
+
         with self._lock:
             for path in list(self._default):
                 registered = self._default[path]
-                for key in keys:
-                    registered.pop(key, None)
+                for key in [k for k, g in registered.items() if matches(k, g)]:
+                    del registered[key]
                 if not registered:
                     del self._default[path]
-            for path, (key, _) in list(self._explicit.items()):
-                if key in keys:
+            for path, (key, stored) in list(self._explicit.items()):
+                if matches(key, stored):
                     del self._explicit[path]
             self._rebuild_children()
 
@@ -649,8 +677,9 @@ def unregister_steps(*steps: Callable[..., object]) -> None:
 
     That covers both ``step`` and ``register_steps``: the bare name, the full
     module path, short namespaces and explicit bindings. A registration goes when
-    it is the same step as one given, in the sense that ``step`` describes. A step
-    that is not registered is ignored. Raises ``TypeError`` for something that is
+    it is the same step as one given, in the sense that ``step`` describes, or is
+    the very object given, even if its defaults or captured values have changed
+    since. A step that is not registered is ignored. Raises ``TypeError`` for something that is
     not callable; every argument is checked first, so a failed call removes
     nothing. Raises ``TypeError`` when no step is given, as ``register_steps``
     does.
@@ -658,7 +687,7 @@ def unregister_steps(*steps: Callable[..., object]) -> None:
     if not steps:
         raise TypeError("unregister_steps() needs at least one step.")
     _check_callables(steps)
-    _registry.remove({_step_key(f) for f in steps})
+    _registry.remove(steps)
 
 
 Given = When = Then = And = StepPrefix()
