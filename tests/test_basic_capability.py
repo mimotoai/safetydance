@@ -1,7 +1,15 @@
 import asyncio
 import logging
 import pytest
-from safetydance import Context, ContextProperty, context, get_context, test_context
+from safetydance import (
+    Context,
+    ContextProperty,
+    NoActiveContext,
+    context,
+    get_context,
+    script,
+    test_context,
+)
 
 
 basic_data = ContextProperty[str]()
@@ -194,3 +202,45 @@ def test_test_context_on_async_function():
         return get_context()["a"]
 
     assert asyncio.run(run(a="x")) == "x"
+
+
+def test_script_does_not_put_its_arguments_in_the_context():
+    @script
+    def run(a):
+        return "a" in get_context()
+
+    assert run(a=1) is False
+
+
+def test_test_context_arguments_are_not_seen_by_a_nested_script():
+    @script
+    def inner():
+        return len(get_context())
+
+    @test_context
+    def outer(a):
+        return inner()
+
+    assert outer(a=1) == 0
+
+
+def test_has_value_does_not_run_the_initializer():
+    calls = []
+    prop = ContextProperty[int](initializer=lambda ctx: calls.append(ctx) or 1)
+
+    @script
+    def run():
+        return prop.has_value
+
+    assert run() is True
+    assert calls == []
+
+
+def test_property_access_outside_a_context_raises():
+    prop = ContextProperty[int]()
+    with pytest.raises(NoActiveContext):
+        prop.has_value
+    with pytest.raises(NoActiveContext):
+        prop.value
+    with pytest.raises(NoActiveContext):
+        prop.value = 1

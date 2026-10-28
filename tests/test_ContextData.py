@@ -636,3 +636,23 @@ def test_class_attributes_with_odd_wrapped_do_not_stop_decoration(attr):
     assert not worker.is_alive(), "context_data hung on the class attribute"
     assert len(built) == 1
     assert isinstance(built[0].__dict__["odd"], attr)
+
+
+def test_super_in_cached_property_alone():
+    # No other method shares the __class__ cell, so only retargeting the cached
+    # property's own function makes super() work.
+    from functools import cached_property
+
+    class Base:
+        def greet(self):
+            return "hi"
+
+    @context_data
+    class Child(Base):
+        value: int = 1
+
+        @cached_property
+        def name(self):
+            return super().greet()
+
+    assert Child().name == "hi"

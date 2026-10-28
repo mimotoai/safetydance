@@ -236,3 +236,32 @@ def test_nested_tracing_logs_each_event_once(caplog):
 
     outer()
     assert len([r for r in caplog.records if "set by" in r.message]) == 1
+
+
+def test_initializer_run_is_traced_as_initialized(caplog):
+    caplog.set_level(logging.INFO)
+    prop = ContextProperty[int]("p", initializer=lambda ctx: 1)
+    with Context(tracing=True):
+        prop.value
+    messages = [r.message for r in caplog.records]
+    assert any(" initialized by " in m for m in messages)
+    assert any(" retrieved by " in m for m in messages)
+
+
+def test_tracing_defaults_to_info_on_the_root_logger(caplog):
+    caplog.set_level(logging.DEBUG)
+    prop = ContextProperty[int]("p")
+    with Context(tracing=True):
+        prop.value = 1
+    [record] = [r for r in caplog.records if " set by " in r.message]
+    assert (record.levelno, record.name) == (logging.INFO, "root")
+
+
+def test_innermost_tracing_context_logs(caplog):
+    caplog.set_level(logging.INFO)
+    prop = ContextProperty[int]("p")
+    with Context(tracing=True, tracing_logger=logging.getLogger("outer")):
+        with Context(tracing=True, tracing_logger=logging.getLogger("middle")):
+            with Context():
+                prop.value = 1
+    assert [r.name for r in caplog.records if " set by " in r.message] == ["middle"]

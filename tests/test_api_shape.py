@@ -40,3 +40,24 @@ def test_contexts_compare_by_identity():
     assert first != Context()
     assert first == first
     assert {first: 1}[first] == 1
+
+
+@pytest.mark.parametrize("decorator", [script, test_context])
+def test_scripts_keep_the_wrapped_function_metadata(decorator):
+    def sync(a: int) -> int:
+        "sync doc"
+        return a
+
+    async def coroutine(a: int) -> int:
+        "async doc"
+        return a
+
+    def generator(a: int):
+        "generator doc"
+        yield a
+
+    for func in (sync, coroutine, generator):
+        wrapped = decorator(func)
+        assert wrapped.__name__ == func.__name__
+        assert wrapped.__doc__ == func.__doc__
+        assert wrapped.__wrapped__ is func
