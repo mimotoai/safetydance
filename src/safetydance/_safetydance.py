@@ -3,7 +3,12 @@ import sys
 from collections.abc import MutableMapping
 from contextvars import ContextVar, copy_context
 from functools import cached_property, partialmethod, wraps
-from inspect import isasyncgenfunction, iscoroutinefunction, isgeneratorfunction
+from inspect import (
+    isasyncgenfunction,
+    iscoroutinefunction,
+    isgeneratorfunction,
+    isroutine,
+)
 from logging import Logger
 from types import FrameType
 from typing import Any, Callable, ClassVar, Generic, ParamSpec, TypeVar, get_origin, overload
@@ -232,6 +237,7 @@ class _GeneratorInContext:
     def __init__(self, run: Callable, gen):
         self._run = run
         self._gen = gen
+        self.close_value: Any = None
 
     def __iter__(self):
         return self
@@ -246,19 +252,23 @@ class _GeneratorInContext:
         return self._run(self._gen.throw, *args)
 
     def close(self):
-        return self._run(self._gen.close)
+        self.close_value = self._run(self._gen.close)
+        return self.close_value
 
 
 def _in_new_context(
     func: Callable[..., Any], make_context: Callable[[dict], Context]
 ) -> Callable[..., Any]:
     """Wrap func so that each call runs in a fresh Context."""
-    if isasyncgenfunction(func):
+    # Callable objects are classified by their __call__, which is what runs.
+    target = func if isroutine(func) else getattr(type(func), "__call__", func)
+    if isasyncgenfunction(target):
         raise TypeError(
-            f"{func.__qualname__}: async generator functions are not supported"
+            f"{getattr(func, '__qualname__', type(func).__qualname__)}: "
+            "async generator functions are not supported"
         )
 
-    if iscoroutinefunction(func):
+    if iscoroutinefunction(target):
 
         @wraps(func)
         async def async_wrapper(*args, **kwargs):
@@ -267,7 +277,7 @@ def _in_new_context(
 
         return async_wrapper
 
-    if isgeneratorfunction(func):
+    if isgeneratorfunction(target):
 
         @wraps(func)
         def generator_wrapper(*args, **kwargs):
@@ -277,8 +287,13 @@ def _in_new_context(
             new_context = make_context(kwargs)
             run(new_context.__enter__)
             try:
-                gen = func(*args, **kwargs)
-                return (yield from _GeneratorInContext(run, gen))
+                driver = _GeneratorInContext(run, func(*args, **kwargs))
+                try:
+                    return (yield from driver)
+                except GeneratorExit:
+                    # yield from discards close()'s value; native generators return it
+                    # (3.13+; earlier versions ignore it).
+                    return driver.close_value
             finally:
                 run(new_context.__exit__, None, None, None)
 

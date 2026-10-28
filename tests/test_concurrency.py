@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import sys
 import threading
 from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor
@@ -221,3 +222,113 @@ def test_shared_context_on_two_tasks_keeps_each_tasks_context():
 
     active_after_exit, _ = asyncio.run(both())
     assert active_after_exit is outer
+
+
+def test_context_restored_after_sync_script_raises():
+    @script
+    def boom():
+        raise ValueError("x")
+
+    with pytest.raises(ValueError):
+        boom()
+    with pytest.raises(NoActiveContext):
+        get_context()
+    with Context() as outer:
+        with pytest.raises(ValueError):
+            boom()
+        assert get_context() is outer
+
+
+def test_context_restored_after_async_script_raises():
+    @script
+    async def boom():
+        raise ValueError("x")
+
+    with pytest.raises(ValueError):
+        asyncio.run(boom())
+    with pytest.raises(NoActiveContext):
+        get_context()
+
+    async def inside_outer():
+        with Context() as outer:
+            with pytest.raises(ValueError):
+                await boom()
+            assert get_context() is outer
+
+    asyncio.run(inside_outer())
+
+
+def test_context_restored_after_generator_script_raises():
+    @script
+    def boom():
+        yield 1
+        raise ValueError("x")
+
+    gen = boom()
+    next(gen)
+    with pytest.raises(ValueError):
+        next(gen)
+    with pytest.raises(NoActiveContext):
+        get_context()
+    with Context() as outer:
+        gen = boom()
+        next(gen)
+        with pytest.raises(ValueError):
+            next(gen)
+        assert get_context() is outer
+
+
+def test_send_and_throw_into_generator_script():
+    @script
+    def echo():
+        slot.value = "data"
+        received = yield "ready"
+        try:
+            yield (received, slot.value)
+        except ValueError:
+            yield ("caught", slot.value)
+
+    gen = echo()
+    assert next(gen) == "ready"
+    assert gen.send(42) == (42, "data")
+    assert gen.throw(ValueError) == ("caught", "data")
+
+
+def test_generator_finally_runs_in_context_on_close():
+    seen = []
+
+    @script
+    def produce():
+        slot.value = "alive"
+        try:
+            yield
+        finally:
+            seen.append(slot.value)
+
+    gen = produce()
+    next(gen)
+    gen.close()
+    assert seen == ["alive"]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="close() value is 3.13+")
+def test_generator_close_returns_value():
+    @script
+    def produce():
+        try:
+            yield
+        except GeneratorExit:
+            return "closing"
+
+    gen = produce()
+    next(gen)
+    assert gen.close() == "closing"
+
+
+def test_async_callable_object_is_an_async_script():
+    class Job:
+        async def __call__(self):
+            slot.value = "x"
+            return slot.value
+
+    assert asyncio.run(script(Job())()) == "x"
