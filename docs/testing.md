@@ -62,8 +62,8 @@ when you import it.
 `Given`, `When`, `Then` and `And` read a test as a story. They are one object;
 the four names are only for how the test reads. Each attribute looks up a step
 by name, and the step it returns is the plain function, so it runs in the
-active context. Calling one outside `@script` or `@test_context` raises that
-step's own `NoActiveContext`.
+active context. A step that reads or writes context data raises
+`NoActiveContext` when called outside `@script` or `@test_context`.
 
 Mark a function with `@step` to make it findable. It returns the function
 unchanged, so you can still call it directly:
