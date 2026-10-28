@@ -83,6 +83,29 @@ def test_redeclared_field_shares_base_slot():
 
 
 @context_data
+class Level:
+    level: int = 1
+
+
+@context_data
+class DeeperLevel(Level):
+    level: int = 2
+
+
+def test_first_unset_read_stores_the_reading_class_default():
+    @script
+    def child_first():
+        return DeeperLevel.level, Level.level
+
+    @script
+    def base_first():
+        return Level.level, DeeperLevel.level
+
+    assert child_first() == (2, 2)
+    assert base_first() == (1, 1)
+
+
+@context_data
 class Top:
     level: str
 

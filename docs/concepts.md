@@ -163,8 +163,11 @@ with ctx:  # make it the active context
 
 ## Subclasses and redeclared fields
 
-A subclass that redeclares a field shares the base class's value and only changes
-the default.
+A subclass that redeclares a field shares the base class's value; only the
+default differs. In each context, the first read that finds no value stores the
+default of the class it reads through, and from then on reads through either
+class return that value. So which default you see depends on which class is read
+first.
 
 ```{code-cell} python
 @context_data
@@ -178,18 +181,31 @@ class Child(Base):
 
 
 @script
-def reads_shared_level():
-    assert Child.level == 2  # Child's default
+def child_first():
+    return Child.level, Base.level
+
+
+@script
+def base_first():
+    return Base.level, Child.level
+
+
+assert child_first() == (2, 2)  # Child's default was stored for both
+assert base_first() == (1, 1)  # Base's default was stored for both
+
+
+@script
+def writes_through_base():
     Base.level = 5
-    assert Child.level == 5  # the same value
+    assert Child.level == 5  # one value, whichever class writes it
 
 
-reads_shared_level()
+writes_through_base()
 ```
 
-One order-dependent edge: if the subclass redeclares a field *without* a default
-while the base has one, an unset read through the subclass raises until something
-reads the base field, which stores the base default.
+A redeclared field without a default has nothing to store, so reading it through
+the subclass raises until a value is stored, for example by reading the base
+field.
 
 ```{code-cell} python
 @context_data
@@ -198,7 +214,7 @@ class NoDefaultChild(Base):
 
 
 @script
-def order_matters():
+def no_default():
     try:
         NoDefaultChild.level
     except ContextDataNotSet:
@@ -209,7 +225,7 @@ def order_matters():
     assert NoDefaultChild.level == 1
 
 
-order_matters()
+no_default()
 ```
 
 ## `del` and `ClassVar`

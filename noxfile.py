@@ -1,6 +1,8 @@
 import nox
 
 nox.options.default_venv_backend = "uv"
+# A bare `nox` skips docs, which needs Node; run it with `nox -s docs`.
+nox.options.sessions = ["test", "typecheck"]
 
 
 def sync(session, group):

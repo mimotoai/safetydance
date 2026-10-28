@@ -5,8 +5,7 @@ safetydance Change Log
 v0.4.0
 ====================
 
-Releases before 0.4.0 (0.3.x and earlier) are not listed here except where
-noted below.
+Releases before 0.4.0 (0.3.x and earlier) are not listed here.
 
 A new API, incompatible with 0.3: steps are plain functions that share a
 context, and ``@script`` runs them in a fresh one. Functions are no longer
@@ -49,40 +48,3 @@ rewritten.
 
 * The package imports without setuptools installed (``pkg_resources`` is no
   longer used).
-
-
-
-v0.2.1
-====================
-
-
-
-v0.1.5
-====================
-
-
-
-v0.1.4
-====================
-
-
-
-v0.1.3
-====================
-
-
-
-v0.1.2
-====================
-
-
-
-v0.1.1
-====================
-
-
-
-v0.1.0
-====================
-
-

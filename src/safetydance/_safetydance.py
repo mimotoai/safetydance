@@ -608,9 +608,14 @@ class ContextData(type):
     raise ``ValueError``. ``ClassVar`` annotations are ordinary class attributes; an
     ``initializer()`` default on one raises ``TypeError``.
 
-    A subclass that redeclares a field shares the base class's value and only
-    changes the default. ``@context_data`` does the same for a class defined without
-    the metaclass.
+    A subclass that redeclares a field shares the base class's value; only the
+    default differs. In each context, the first read that finds no value stores the
+    default of the class it reads through, and reads through either class then
+    return it. So with ``level: int = 1`` on ``Base`` and ``level: int = 2`` on
+    ``Child(Base)``, reading ``Child.level`` first makes ``Base.level`` 2, and
+    reading ``Base.level`` first makes ``Child.level`` 1. A redeclared field with no
+    default raises until a value is stored. ``@context_data`` does the same for a
+    class defined without the metaclass.
     """
 
     def __new__(mcls, name, bases, namespace, **kwds):
@@ -726,6 +731,10 @@ def context_data(cls: type[T]) -> type[T]:
     A default wrapped in ``initializer()`` is called with the Context on first read;
     any other default is a constant. Unhashable defaults raise ``ValueError``, as
     with dataclasses.
+
+    A subclass that redeclares a field shares the base class's value. The first
+    read in a context that finds no value stores the default of the class it reads
+    through, for both classes (see ``ContextData``).
 
     The decorator rebuilds the class, so a base class's ``__init_subclass__`` runs
     again and class keywords are not carried over; use ``metaclass=ContextData`` for

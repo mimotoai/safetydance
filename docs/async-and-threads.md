@@ -66,17 +66,22 @@ assert flag.get() == "after"  # the generator's change did not leak out
 
 ## Worker threads
 
-A new thread starts with no active context. To run a step against the caller's
-context, submit it through `copy_context().run`; take a fresh copy for each
-submission.
+A new thread starts with no active context on a standard Python build. On a
+free-threaded build of Python 3.14, where `sys.flags.thread_inherit_context` is on
+by default, a thread starts in a copy of the context that started it, so a pool
+thread keeps whatever context was active when it was created. Either way, to run
+a step against the caller's context, submit it through `copy_context().run`; take
+a fresh copy for each submission.
 
 ```{code-cell} python
 import contextvars
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 from safetydance import NoActiveContext, get_context
 
 seen = ContextProperty[str]("seen", initializer=lambda ctx: "default")
+inherits_context = getattr(sys.flags, "thread_inherit_context", False)
 
 
 def reads_seen() -> str:
@@ -90,9 +95,9 @@ def uses_pool() -> str:
         try:
             pool.submit(get_context).result()
         except NoActiveContext:
-            pass
+            assert not inherits_context  # standard build: no context in the worker
         else:
-            raise AssertionError("workers have no active context")
+            assert inherits_context  # free-threaded 3.14: inherited from the caller
         return pool.submit(contextvars.copy_context().run, reads_seen).result()
 
 

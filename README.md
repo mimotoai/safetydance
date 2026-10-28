@@ -101,7 +101,7 @@ nested scripts no longer share a context. See the
 ```bash
 uv sync                # create .venv with the dev dependency group
 uv run pytest          # run the tests on the default interpreter
-uv run nox             # run the tests on every supported Python version
+uv run nox             # run the tests on every supported Python version, and mypy
 uv build               # build the sdist and wheel into dist/
 ```
 
