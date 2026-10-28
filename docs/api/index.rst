@@ -31,6 +31,7 @@ Steps
 .. autofunction:: step
 .. autofunction:: step_namespace
 .. autofunction:: register_steps
+.. autofunction:: unregister_steps
 .. autoclass:: StepPrefix
 
 .. data:: Given

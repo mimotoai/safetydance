@@ -16,6 +16,7 @@ __all__ = [
     "register_steps",
     "step",
     "step_namespace",
+    "unregister_steps",
 ]
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -285,6 +286,19 @@ class _Registry:
                     f"{_full_name(first[1])}; cannot also register "
                     f"{_full_name(f)} there."
                 )
+
+    def remove(self, keys: set[_Key]) -> None:
+        with self._lock:
+            for path in list(self._default):
+                registered = self._default[path]
+                for key in keys:
+                    registered.pop(key, None)
+                if not registered:
+                    del self._default[path]
+            for path, (key, _) in list(self._explicit.items()):
+                if key in keys:
+                    del self._explicit[path]
+            self._rebuild_children()
 
     def _roll_back(self, records: list[_Record]) -> None:
         with self._lock:
@@ -557,6 +571,21 @@ def register_steps(*steps: Callable[..., object], namespace: str | None = None) 
     path = () if namespace is None else _namespace_path(namespace)
     _check_callables(steps)
     _registry.add_explicit_all(list(steps), path)
+
+
+def unregister_steps(*steps: Callable[..., object]) -> None:
+    """
+    Remove ``steps`` from every path they are registered at.
+
+    That covers both ``step`` and ``register_steps``: the bare name, the full
+    module path, short namespaces and explicit bindings. A registration goes when
+    it is the same step as one given, in the sense that ``step`` describes. A step
+    that is not registered is ignored. Raises ``TypeError`` for something that is
+    not callable; every argument is checked first, so a failed call removes
+    nothing.
+    """
+    _check_callables(steps)
+    _registry.remove({_step_key(f) for f in steps})
 
 
 Given = When = Then = And = StepPrefix()

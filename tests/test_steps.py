@@ -18,6 +18,7 @@ from safetydance._steps import (
     register_steps,
     step,
     step_namespace,
+    unregister_steps,
 )
 
 
@@ -675,6 +676,77 @@ def test_lambda_is_rejected_for_its_name():
         step(lambda: None)
     with pytest.raises(ValueError, match="<lambda>"):
         register_steps(lambda: None)
+
+
+# R8: unregister_steps.
+
+
+def test_unregister_removes_every_registration_of_a_step():
+    get = step_namespace("http")(make_step("pkg_a.steps", "get", "a"))
+    register_steps(get, namespace="other")
+    unregister_steps(get)
+    for look_up in [
+        lambda: Given.get,
+        lambda: Given.http,
+        lambda: Given.pkg_a,
+        lambda: Given.other,
+    ]:
+        with pytest.raises(StepNotFound):
+            look_up()
+    assert dir(Given) == []
+
+
+def test_unregister_matches_an_equal_step():
+    client = Client("a")
+    step(client.fetch)
+    register_steps(client.fetch, namespace="x")
+    # A new bound method object, and a copy of the function made alike.
+    unregister_steps(client.fetch)
+    with pytest.raises(StepNotFound):
+        Given.fetch
+    step(make_step("pkg_a.steps", "get"))
+    unregister_steps(make_step("pkg_a.steps", "get"))
+    with pytest.raises(StepNotFound):
+        Given.get
+
+
+def test_unregister_keeps_other_steps():
+    a_get = step(make_step("pkg_a.steps", "get", "a"))
+    step(make_step("pkg_b.steps", "get", "b"))
+    step_namespace("http")(make_step("pkg_a.steps", "post", "p"))
+    unregister_steps(a_get)
+    assert Given.get() == "b"
+    assert Given.pkg_a.steps.post() == "p"
+    assert dir(Given.pkg_a.steps) == ["post"]
+
+
+def test_unregister_unknown_step_is_a_no_op():
+    step(make_step("pkg_a.steps", "get", "a"))
+    unregister_steps(make_step("pkg_b.steps", "get"), fetch)
+    unregister_steps()
+    assert Given.get() == "a"
+
+
+def test_unregister_rejects_non_callables_and_removes_nothing():
+    get = step(make_step("pkg_a.steps", "get", "a"))
+    with pytest.raises(TypeError):
+        unregister_steps(get, 1)
+    assert Given.get() == "a"
+
+
+def test_register_unregister_register_again():
+    get = make_step("pkg_a.steps", "get", "a")
+    other = make_step("pkg_b.steps", "get", "b")
+    register_steps(get)
+    unregister_steps(get)
+    # The path is free again, so a different step can take it.
+    register_steps(other)
+    assert Given.get() == "b"
+    unregister_steps(other)
+    register_steps(get)
+    step(get)
+    assert Given.get() == "a"
+    assert Given.pkg_a.steps.get() == "a"
 
 
 # R9: StepPrefix has no attributes of its own.

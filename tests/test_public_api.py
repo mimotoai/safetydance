@@ -17,6 +17,7 @@ def test_star_import_exports_only_the_public_api():
         "register_steps",
         "step",
         "step_namespace",
+        "unregister_steps",
         "Context",
         "ContextData",
         "ContextDataNotSet",

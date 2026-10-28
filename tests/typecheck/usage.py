@@ -13,6 +13,7 @@ from safetydance import (
     script,
     step,
     step_namespace,
+    unregister_steps,
 )
 
 
@@ -76,6 +77,14 @@ def typed_ns_step(x: int) -> str:
 assert_type(typed_ns_step(1), str)
 
 register_steps(typed_step, namespace="other")
+unregister_steps(typed_step, typed_ns_step)
+
+
+def rejected_calls() -> None:
+    # Never called. `mypy --strict` warns on unused ignores, so each line must fail.
+    register_steps(1)  # type: ignore[arg-type]
+    register_steps(typed_step, namespace=1)  # type: ignore[arg-type]
+    unregister_steps("typed_step")  # type: ignore[arg-type]
 
 
 @script
