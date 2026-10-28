@@ -228,8 +228,9 @@ def test_create_release_raises_other_api_errors(gitlab, monkeypatch):
     assert info.value.code == 403
 
 
-def test_script_runs_against_this_repository():
+def test_script_runs_against_this_repository(monkeypatch):
     """The real pyproject.toml parses and the published part is computable."""
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
     project = release.pyproject_at(None)
     assert release.version_of(project) >= Version("0.3.0")
     assert "version" not in release.published_part(project)["project"]

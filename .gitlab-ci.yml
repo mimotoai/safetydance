@@ -29,7 +29,8 @@ test:
     matrix:
       - PYTHON: ["3.10", "3.11", "3.12", "3.13", "3.14"]
   script:
-    - uv run --locked --no-default-groups --group test -p "$PYTHON" pytest -q
+    - uv run --locked --no-default-groups --group test -p "$PYTHON" pytest -q --cov --cov-report=term
+  coverage: '/^TOTAL.+?(\d+%)$/'
 
 typecheck:
   stage: test

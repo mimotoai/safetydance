@@ -1,7 +1,5 @@
 import safetydance
 
-pytest_plugins = ["pytester"]
-
 
 def test_star_import_exports_only_the_public_api():
     namespace = {}

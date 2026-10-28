@@ -2,9 +2,6 @@
 *~
 *.py[cod]
 *.so
-*.cfg
-!.isort.cfg
-!setup.cfg
 *.orig
 *.log
 *.pot
@@ -39,20 +36,16 @@ coverage.xml
 build/*
 dist/*
 sdist/*
-docs/api/*
-docs/_rst/*
 docs/_build/*
-cover/*
-MANIFEST
 
 # Per-project virtualenvs
 .venv*/
 
 .ipynb_checkpoints
 
-# Rever
-rever/
 .vscode/settings.json
 
 .nox
-docs/_build
+_build/
+public/
+.uv-cache/
