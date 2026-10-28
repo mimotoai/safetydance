@@ -1,9 +1,14 @@
 import logging
 import sys
-import threading
 from collections.abc import MutableMapping
+from contextvars import ContextVar, copy_context
 from functools import wraps
-from inspect import currentframe
+from inspect import (
+    currentframe,
+    isasyncgenfunction,
+    iscoroutinefunction,
+    isgeneratorfunction,
+)
 from logging import Logger
 from types import FrameType
 from typing import Any, Callable, Generic, TypeVar
@@ -132,20 +137,18 @@ class Context(MutableMapping[ContextProperty | str, Any]):
         return f"Context({self._data!r})"
 
     def __enter__(self) -> "Context":
-        global THREAD_LOCALS
-        parent = getattr(THREAD_LOCALS, "context", None)
+        parent = _CURRENT_CONTEXT.get()
         ancestor = parent
         while ancestor is not None:
             if ancestor is self:
                 raise RuntimeError(f"{self!r} is already active")
             ancestor = ancestor.parent
         self.parent = parent
-        THREAD_LOCALS.context = self
+        _CURRENT_CONTEXT.set(self)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        global THREAD_LOCALS
-        THREAD_LOCALS.context = self.parent
+        _CURRENT_CONTEXT.set(self.parent)
         self.parent = None
 
     def _trace(self, context_data: ContextProperty, op: str, frame: FrameType):
@@ -160,7 +163,11 @@ class Context(MutableMapping[ContextProperty | str, Any]):
             self.parent._trace(context_data, op, frame)
 
 
-THREAD_LOCALS = threading.local()
+# A ContextVar rather than a thread-local: each asyncio task gets its own copy, so
+# concurrent tasks on one thread never see each other's active Context.
+_CURRENT_CONTEXT: ContextVar[Context | None] = ContextVar(
+    "safetydance_context", default=None
+)
 
 
 def get_context() -> Context:
@@ -168,10 +175,94 @@ def get_context() -> Context:
     Automatically retrieve and optionally create the context for use with step
     functions.
     """
-    global THREAD_LOCALS
-    if not hasattr(THREAD_LOCALS, "context") or THREAD_LOCALS.context is None:
+    current = _CURRENT_CONTEXT.get()
+    if current is None:
         raise Exception("No context set! Did you forget to use the @context decorator?")
-    return THREAD_LOCALS.context
+    return current
+
+
+class _GeneratorInContext:
+    """Drives a generator with every step run inside the given contextvars Context."""
+
+    def __init__(self, run: Callable, gen):
+        self._run = run
+        self._gen = gen
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self._run(next, self._gen)
+
+    def send(self, value):
+        return self._run(self._gen.send, value)
+
+    def throw(self, *args):
+        return self._run(self._gen.throw, *args)
+
+    def close(self):
+        return self._run(self._gen.close)
+
+
+def _in_new_context(func: Callable, make_context: Callable[[dict], Context]):
+    """Wrap func so that each call runs in a fresh Context."""
+    if isasyncgenfunction(func):
+        raise TypeError(
+            f"{func.__qualname__}: async generator functions are not supported"
+        )
+
+    if iscoroutinefunction(func):
+
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            with make_context(kwargs):
+                return await func(*args, **kwargs)
+
+        return async_wrapper
+
+    if isgeneratorfunction(func):
+
+        @wraps(func)
+        def generator_wrapper(*args, **kwargs):
+            # A generator body runs in whichever contextvars context resumes it, so
+            # bind the Context to a private copy that is active only during each step.
+            run = copy_context().run
+            new_context = make_context(kwargs)
+            run(new_context.__enter__)
+            try:
+                gen = func(*args, **kwargs)
+                return (yield from _GeneratorInContext(run, gen))
+            finally:
+                run(new_context.__exit__, None, None, None)
+
+        return generator_wrapper
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with make_context(kwargs):
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
+def _context_factory(
+    tracing_log_level: int | None,
+    tracing_logger: Logger | None,
+    with_fixtures: bool,
+) -> Callable[[dict], Context]:
+    tracing = tracing_log_level is not None or tracing_logger is not None
+
+    def make_context(kwargs: dict) -> Context:
+        return Context(
+            kwargs if with_fixtures else {},
+            tracing=tracing,
+            tracing_logger=tracing_logger,
+            tracing_log_level=(
+                logging.INFO if tracing_log_level is None else tracing_log_level
+            ),
+        )
+
+    return make_context
 
 
 def context(
@@ -179,34 +270,12 @@ def context(
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ):
-    tracing = tracing_log_level is not None or tracing_logger is not None
-
-    if func:
-
-        @wraps(func)
-        def direct_wrapper(*args, **kwargs):
-            with Context(
-                tracing=tracing,
-                tracing_logger=tracing_logger,
-                tracing_log_level=tracing_log_level,
-            ):
-                return func(*args, **kwargs)
-
-        return direct_wrapper
+    make_context = _context_factory(tracing_log_level, tracing_logger, False)
 
     def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            with Context(
-                tracing=tracing,
-                tracing_logger=tracing_logger,
-                tracing_log_level=tracing_log_level,
-            ):
-                return func(*args, **kwargs)
+        return _in_new_context(func, make_context)
 
-        return wrapper
-
-    return decorator
+    return decorator(func) if func else decorator
 
 
 script = context
@@ -218,36 +287,12 @@ def test_context(
     tracing_logger: Logger | None = None,
 ):
     """Grab the test fixtures and put them into the Context."""
-    tracing = tracing_log_level is not None or tracing_logger is not None
-
-    if func:
-
-        @wraps(func)
-        def direct_wrapper(*args, **kwargs):
-            with Context(
-                tracing=tracing,
-                tracing_logger=tracing_logger,
-                tracing_log_level=tracing_log_level,
-            ) as context:
-                context.update(kwargs)
-                return func(*args, **kwargs)
-
-        return direct_wrapper
+    make_context = _context_factory(tracing_log_level, tracing_logger, True)
 
     def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            with Context(
-                tracing=tracing,
-                tracing_logger=tracing_logger,
-                tracing_log_level=tracing_log_level,
-            ) as context:
-                context.update(kwargs)
-                return func(*args, **kwargs)
+        return _in_new_context(func, make_context)
 
-        return wrapper
-
-    return decorator
+    return decorator(func) if func else decorator
 
 
 class ContextPropertyDescriptor:

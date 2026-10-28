@@ -153,3 +153,10 @@ def test_call_and_setitem_trace_given_context(caplog):
     messages = [record.message for record in caplog.records]
     assert any("set by" in message and __file__ in message for message in messages)
     assert any("retrieved by" in message and __file__ in message for message in messages)
+
+
+@context(tracing_logger=logging.getLogger("safetydance"))
+def test_context_tracing_with_logger_only(caplog):
+    caplog.set_level(logging.INFO)
+    basic_data.value = "traced"
+    assert any("set by" in record.message for record in caplog.records)
