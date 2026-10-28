@@ -15,8 +15,23 @@ workflow:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
+# uv's cache is keyed on uv.lock and pruned after each job, so only the wheels
+# that are still needed are stored. Copy mode because the cache and the project
+# can be on different filesystems.
+variables:
+  UV_CACHE_DIR: .uv-cache
+  UV_LINK_MODE: copy
+
 default:
   image: ghcr.io/astral-sh/uv:0.9.0-python3.12-bookworm
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .uv-cache
+  after_script:
+    - uv cache prune --ci
 
 stages:
   - test
@@ -35,15 +50,23 @@ test:
 typecheck:
   stage: test
   script:
-    - uv run --locked --no-default-groups --group typing -p 3.14 mypy src tests/typecheck
+    - uv run --locked --no-default-groups --group typing -p 3.14 mypy src
+    - uv run --locked --no-default-groups --group typing -p 3.14 mypy --strict tests/typecheck
 
 # PyPI refuses an upload whose README doesn't render; check the built metadata
-# on every pipeline rather than at publish time.
+# on every pipeline rather than at publish time. The wheel is also installed
+# into a clean venv to prove it imports, carries the project version and ships
+# py.typed.
 package:
   stage: test
   script:
     - uv build -q -o build/dist-check
     - uv run --no-project --with "twine==7.0.0" twine check --strict build/dist-check/*
+    - uv venv -q build/wheel-venv
+    - uv pip install -q -p build/wheel-venv build/dist-check/*.whl
+    - |
+      expected="$(uv version --short)"
+      EXPECTED="$expected" build/wheel-venv/bin/python -c 'import os, pathlib, safetydance; assert safetydance.__version__ == os.environ["EXPECTED"], safetydance.__version__; assert (pathlib.Path(safetydance.__file__).parent / "py.typed").is_file()'
 
 # A merge request that changes the package (src/safetydance/, or the published
 # parts of pyproject.toml) must raise the version above the target branch's and
@@ -88,7 +111,7 @@ publish:
     - ': "${UV_PYPI_ACCESS_TOKEN:?}"'
     - uv run --no-project --with packaging python scripts/release.py create-release
     - uv build
-    - uv publish
+    - uv publish --check-url https://pypi.org/simple/
   artifacts:
     paths:
       - dist

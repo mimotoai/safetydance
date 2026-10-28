@@ -9,7 +9,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -19,6 +22,7 @@ classifiers = [
 ]
 
 [project.urls]
+Documentation = "https://dcharbon.gitlab.io/safetydance"
 Homepage = "https://gitlab.com/dcharbon/safetydance"
 Repository = "https://gitlab.com/dcharbon/safetydance.git"
 Changelog = "https://gitlab.com/dcharbon/safetydance/-/blob/main/CHANGELOG.rst"
@@ -33,6 +37,9 @@ dev = [
     { include-group = "typing" },
     "nox>=2025.2.9",
 ]
+
+[tool.uv.build-backend]
+source-include = ["CHANGELOG.rst", "tests/**", "scripts/**"]
 
 [build-system]
 requires = ["uv_build>=0.9.0,<0.10.0"]
