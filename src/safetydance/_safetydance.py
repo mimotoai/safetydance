@@ -3,15 +3,10 @@ import sys
 from collections.abc import MutableMapping
 from contextvars import ContextVar, copy_context
 from functools import wraps
-from inspect import (
-    currentframe,
-    isasyncgenfunction,
-    iscoroutinefunction,
-    isgeneratorfunction,
-)
+from inspect import isasyncgenfunction, iscoroutinefunction, isgeneratorfunction
 from logging import Logger
 from types import FrameType
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, ParamSpec, TypeVar, overload
 
 if sys.version_info >= (3, 14):
     from annotationlib import Format, get_annotations
@@ -24,14 +19,28 @@ else:
     from inspect import get_annotations as _own_annotations
 
 
+__all__ = [
+    "Context",
+    "ContextData",
+    "ContextProperty",
+    "context",
+    "context_data",
+    "get_context",
+    "initializer",
+    "script",
+    "test_context",
+]
+
 T = TypeVar("T")
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 class ContextProperty(Generic[T]):
-    name: str
-    description: str
-    initializer: Callable[["Context"], T]
-    declaring_cls: type
+    name: str | None
+    description: str | None
+    initializer: Callable[["Context"], T] | None
+    declaring_cls: type | None
 
     def __init__(
         self,
@@ -47,17 +56,17 @@ class ContextProperty(Generic[T]):
 
     @property
     def value(self) -> T:
-        return self._get(get_context(), currentframe().f_back)
+        return self._get(get_context(), sys._getframe(1))
 
     @value.setter
     def value(self, new_value: T):
-        self._set(get_context(), new_value, currentframe().f_back)
+        self._set(get_context(), new_value, sys._getframe(1))
 
     def __call__(self, context: "Context") -> T:
-        return self._get(context, currentframe().f_back)
+        return self._get(context, sys._getframe(1))
 
     def __setitem__(self, context: "Context", new_value: T):
-        self._set(context, new_value, currentframe().f_back)
+        self._set(context, new_value, sys._getframe(1))
 
     # Values are stored under the property itself, so same-named properties never
     # collide. The name is only a read fallback, which lets values supplied by name
@@ -111,7 +120,7 @@ class Context(MutableMapping[ContextProperty | str, Any]):
         self.tracing = tracing
         self.tracing_logger = tracing_logger or logging.getLogger()
         self.tracing_log_level = tracing_log_level
-        self.parent = None
+        self.parent: Context | None = None
         self._data = dict(*args, **kwargs)
 
     # Every Context owns its storage: a nested Context (and so a nested script) never
@@ -204,7 +213,9 @@ class _GeneratorInContext:
         return self._run(self._gen.close)
 
 
-def _in_new_context(func: Callable, make_context: Callable[[dict], Context]):
+def _in_new_context(
+    func: Callable[..., Any], make_context: Callable[[dict], Context]
+) -> Callable[..., Any]:
     """Wrap func so that each call runs in a fresh Context."""
     if isasyncgenfunction(func):
         raise TypeError(
@@ -265,11 +276,27 @@ def _context_factory(
     return make_context
 
 
+@overload
 def context(
-    func: Callable | None = None,
+    func: Callable[P, R],
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
-):
+) -> Callable[P, R]: ...
+
+
+@overload
+def context(
+    func: None = None,
+    tracing_log_level: int | None = None,
+    tracing_logger: Logger | None = None,
+) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+
+
+def context(
+    func: Callable[..., Any] | None = None,
+    tracing_log_level: int | None = None,
+    tracing_logger: Logger | None = None,
+) -> Any:
     make_context = _context_factory(tracing_log_level, tracing_logger, False)
 
     def decorator(func):
@@ -281,11 +308,27 @@ def context(
 script = context
 
 
+@overload
 def test_context(
-    func: Callable | None = None,
+    func: Callable[P, R],
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
-):
+) -> Callable[P, R]: ...
+
+
+@overload
+def test_context(
+    func: None = None,
+    tracing_log_level: int | None = None,
+    tracing_logger: Logger | None = None,
+) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+
+
+def test_context(
+    func: Callable[..., Any] | None = None,
+    tracing_log_level: int | None = None,
+    tracing_logger: Logger | None = None,
+) -> Any:
     """Grab the test fixtures and put them into the Context."""
     make_context = _context_factory(tracing_log_level, tracing_logger, True)
 
@@ -293,6 +336,10 @@ def test_context(
         return _in_new_context(func, make_context)
 
     return decorator(func) if func else decorator
+
+
+# The name starts with "test", so stop pytest collecting it wherever it is imported.
+test_context.__test__ = False  # type: ignore[attr-defined]
 
 
 class ContextPropertyDescriptor:
@@ -307,13 +354,41 @@ class ContextPropertyDescriptor:
         self.context_data.value = value
 
 
+class _Initializer:
+    def __init__(self, fn: Callable[["Context"], Any]):
+        self.fn = fn
+
+
+def initializer(fn: Callable[["Context"], T]) -> T:
+    """
+    Mark a context_data default as an initializer, called with the Context on first
+    read. Typed as returning T so that `cart: list[str] = initializer(...)` checks.
+    """
+    return _Initializer(fn)  # type: ignore[return-value]
+
+
+def _initializer_for(field_name: str, default: Any) -> Callable[["Context"], Any]:
+    """An initializer() default is called on first read; anything else is a constant."""
+    if isinstance(default, _Initializer):
+        return default.fn
+    if type(default).__hash__ is None:
+        # Like dataclasses: one mutable object would be shared by every context.
+        raise ValueError(
+            f"mutable default {type(default).__name__} for field {field_name!r} is "
+            f"not allowed: use `initializer(lambda ctx: {default!r})`"
+        )
+    return lambda ctx: default
+
+
 class ContextData(type):
     def __new__(cls, name, bases, namespace):
         # Annotations are read from the finished class: on 3.14+ the namespace holds
         # a lazy __annotate__ function rather than an __annotations__ dict.
         ret = super().__new__(cls, name, bases, namespace)
         for field_name, type_hint in _own_annotations(ret).items():
-            initializer = namespace.get(field_name, None)
+            initializer = None
+            if field_name in namespace:
+                initializer = _initializer_for(field_name, namespace[field_name])
             context_data = ContextProperty[type_hint](
                 field_name, initializer=initializer, declaring_cls=ret
             )
@@ -342,6 +417,7 @@ def _retarget_class_cells(old_cls: type, new_cls: type):
     class body close over a __class__ cell holding the original class.
     """
     for attr in new_cls.__dict__.values():
+        funcs: list[Any]
         if isinstance(attr, (classmethod, staticmethod)):
             funcs = [attr.__func__]
         elif isinstance(attr, property):
@@ -352,7 +428,7 @@ def _retarget_class_cells(old_cls: type, new_cls: type):
             code = getattr(func, "__code__", None)
             if code is None or "__class__" not in code.co_freevars:
                 continue
-            cell = func.__closure__[code.co_freevars.index("__class__")]
+            cell = (func.__closure__ or ())[code.co_freevars.index("__class__")]
             if cell.cell_contents is old_cls:
                 cell.cell_contents = new_cls
 
@@ -364,11 +440,15 @@ def context_data(cls):
     This allows classes to be defined without explicitly specifying the metaclass,
     making the API more user-friendly.
 
+    A default wrapped in initializer() is called with the Context on first read; any
+    other default is a constant. Mutable defaults are rejected, as with dataclasses.
+
     Usage:
         @context_data
         class MyData:
             field1: str
             field2: int = 42
+            field3: list = initializer(lambda ctx: [])
     """
     # Create a new namespace dictionary from the class's __dict__
     namespace = {}

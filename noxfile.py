@@ -9,3 +9,9 @@ PYPROJECT = nox.project.load_toml("pyproject.toml")
 def test(session):
     session.install(".", *nox.project.dependency_groups(PYPROJECT, "test"))
     session.run("pytest")
+
+
+@nox.session(python="3.14")
+def typecheck(session):
+    session.install(".", *nox.project.dependency_groups(PYPROJECT, "typing"))
+    session.run("mypy", "src", "tests/typecheck")

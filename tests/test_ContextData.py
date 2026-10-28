@@ -1,17 +1,18 @@
 import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
 
 import safetydance
-from safetydance import context, context_data
+from safetydance import context, context_data, initializer
 
 
 @context_data
 class TestData:
     basic: str
-    with_initializer: str = lambda ctx: "initialized_value"
+    with_initializer: str = initializer(lambda ctx: "initialized_value")
 
 
 @dataclass
@@ -356,3 +357,52 @@ def test_non_field_class_attribute_can_be_assigned():
     Reassigned.extra = 1
     assert Reassigned.describe() == "replaced"
     assert Reassigned.extra == 1
+
+
+def format_total(total: float) -> str:
+    return f"${total:.2f}"
+
+
+@context_data
+class Defaults:
+    count: int = 0
+    nothing: str | None = None
+    built: list = initializer(lambda ctx: ["fresh"])
+    formatter: Callable[[float], str] = format_total
+
+
+@context
+def test_non_callable_default_is_a_constant():
+    assert Defaults.count == 0
+    assert Defaults.nothing is None
+    Defaults.count += 1
+    assert Defaults.count == 1
+
+
+@context
+def test_initializer_default_runs_on_first_read():
+    assert Defaults.built == ["fresh"]
+
+
+def test_initializer_default_is_fresh_in_each_context():
+    @context
+    def run():
+        Defaults.built.append("added")
+        return Defaults.built
+
+    assert run() == ["fresh", "added"]
+    assert run() == ["fresh", "added"]
+
+
+@context
+def test_callable_default_is_a_constant():
+    assert Defaults.formatter is format_total
+    assert Defaults.formatter(3) == "$3.00"
+
+
+def test_mutable_default_is_rejected():
+    with pytest.raises(ValueError, match=r"items.*initializer\(lambda ctx: \[\]\)"):
+
+        @context_data
+        class Shared:
+            items: list = []
