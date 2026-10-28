@@ -69,14 +69,6 @@ their signatures for type checkers.
 In tests, `@test_context` works like `@script` and also puts the call's keyword
 arguments, such as pytest fixtures, into the context by name.
 
-## Migrating from 0.3
-
-0.4 is a new API, not compatible with 0.3: `@step` functions are plain functions,
-`step_data` and `ContextKey` became `ContextProperty` and `@context_data`, and
-nested scripts no longer share a context. See the
-[migration guide](https://dcharbon.gitlab.io/safetydance/migrating/), or pin
-`safetydance<0.4` until you can migrate.
-
 ### Context Scope Variables
 
 A context scope variable is sort of like a global variable. The run of a script defines
@@ -86,6 +78,14 @@ Think of a conversation between two friends. Much of the conversation will refer
 assumed shared knowledge, or context. For `safetydance`, the context scope provides a
 way for steps to share assumed context to make it possible to provide a more
 conversational style of programming
+
+## Migrating from 0.3
+
+0.4 is a new API, not compatible with 0.3: `@step` functions are plain functions,
+`step_data` and `ContextKey` became `ContextProperty` and `@context_data`, and
+nested scripts no longer share a context. See the
+[migration guide](https://dcharbon.gitlab.io/safetydance/migrating/), or pin
+`safetydance<0.4` until you can migrate.
 
 ## Future Work
 

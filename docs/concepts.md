@@ -97,7 +97,7 @@ assert fills_cart() == ("Ada", "EUR", ["apple"])
 
 ## Constants and `initializer`
 
-A plain default is a constant shared by every context, so a mutable default such
+A plain default is a constant shared by every context, so an unhashable default such
 as `[]` is rejected, as in dataclasses. Wrap a default in `initializer(fn)` to
 compute it per context: `fn(ctx)` runs on the first read and the result is
 stored.

@@ -23,7 +23,8 @@ rewritten.
   tasks each see their own context. ``@test_context`` puts pytest fixtures in
   the context by name.
 * ``ContextProperty.has_value`` tells whether a read would produce a value.
-  ``NoActiveContext`` is raised outside any context, and ``ContextDataNotSet``
+  ``NoActiveContext`` is raised by ``get_context()`` and
+  ``ContextProperty.value`` outside any context, and ``ContextDataNotSet``
   (a ``KeyError`` and an ``AttributeError``) for unset values, so ``hasattr``
   and ``getattr`` with a default work.
 * A documentation site with a user guide and API reference, including a
