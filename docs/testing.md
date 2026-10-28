@@ -117,10 +117,10 @@ A step is found three ways. Use the shortest one that is not ambiguous:
 ```{code-cell} python
 from safetydance import Given, step_namespace
 
-step = step_namespace("greeting")
+greeting_step = step_namespace("greeting")
 
 
-@step
+@greeting_step
 def says_hello(name):
     return f"hello {name}"
 
@@ -130,11 +130,33 @@ assert Given.says_hello("Ada") == "hello Ada"
 ```
 
 A bare name or short namespace that several different steps share raises
-`AmbiguousStep`, which lists every candidate's full module path. A step is
-identified by where it is defined (file, line and qualified name), so loading
-one module under two names is still one step. Closures made by one factory are
-distinct steps, so their bare names and full paths are ambiguous: register
-them explicitly, or give each a short namespace.
+`AmbiguousStep`, which lists every candidate's full module path. So does any
+name that is both a step and the start of another registered path, such as a
+module `login` with a step `login`. A short namespace makes `Given.greeting.x`
+reachable, but the bare `Given.x` stays ambiguous unless it is bound with
+`register_steps`.
+
+A step is identified by where it is defined, so loading one module under two
+names is still one step. For a function that is its definition location (file,
+line and qualified name) and code, its wrapper chain (each `functools.wraps`
+layer counts) and its default values. Closures are identified by their code
+and captured values, bound methods by their instance, and other callables
+(classes, instances) by object identity. Closures made by one factory that
+capture different values are distinct steps, so their bare names and full
+paths are ambiguous: register them explicitly, or give each a short
+namespace.
+
+Defining a step again at a different line, as reloading a module or re-running
+an edited notebook cell does, leaves the old one registered, so the name
+becomes ambiguous. Remove the old one first with `unregister_steps`, which
+drops a step from every path it is registered at (`@step` and
+`register_steps` alike) and ignores a step that is not registered:
+
+```python
+from safetydance import unregister_steps
+
+unregister_steps(old_says_hello)
+```
 
 `register_steps` settles a collision, and always beats a step registered with
 `@step`. Call it with the step you want, and the namespace to find it under (or
@@ -155,38 +177,55 @@ register_steps(pours, namespace="kettle")
 assert Given.kettle.pours() == "water"
 ```
 
-Binding a different step to a path that is already registered explicitly
-raises `ValueError`. So do names and namespace segments that start with `_` or
-are not identifiers.
+`register_steps` raises `ValueError` when a different step is already bound at
+the path, when the path is already a namespace of other steps, or when it is
+under a path bound to a step. Every argument is checked first, so a failed call
+binds nothing. `register_steps()` with no steps raises `TypeError`.
+
+`@step` raises `ValueError` for a name that starts with `_`, is not an
+identifier, is a keyword or is `<lambda>`, and `TypeError` for something
+without a `__name__` and `__module__`. The same `ValueError` applies to names
+and namespace segments given to `step_namespace` and `register_steps`.
 
 ### Importing step modules
 
 A step exists once its module has been imported. Either import the step
 modules a test uses, or have the library expose them through a
-`safetydance.steps` entry point. The entry point's name is the root of the
-lookup, and its value is the module:
+`safetydance.steps` entry point. The entry point's name is only a label; it
+should match the namespace the module registers, and its value is the module:
 
 ```toml
 [project.entry-points."safetydance.steps"]
 http = "my_package.steps"
 ```
 
-A lookup of `Given.http` imports only the entry points named `http`. A root
-name that no entry point has, such as the bare name `Given.get`, imports all of
-them first, since any of them may register it. If a lookup at any depth, such
-as `Given.http.upload`, is still not found or is ambiguous, all the remaining
-entry points are imported and the lookup is tried once more before it fails
-with `StepNotFound` or `AmbiguousStep`. So which entry points earlier lookups
-happened to import never changes the result.
+The first lookup that does not start with `_` imports every installed
+`safetydance.steps` entry point, so what a lookup returns never depends on the
+order of lookups. A successfully loaded entry point is not loaded again.
 
-An entry point's module is imported once. If it fails to import, the import
-error reaches the caller from any lookup that loads it, including a
-`hasattr(Given, ...)` miss. The exception is an import that raises
-`AttributeError`: `hasattr` and `getattr(Given, name, default)` catch it, so
-the failure is hidden and the lookup looks like a plain miss.
+If an entry point fails to import, the error reaches the caller from the
+lookup, including a `hasattr(Given, ...)` miss, and the steps it had
+registered are rolled back (steps of modules that did import stay, as those
+modules are not imported again). The next lookup tries the entry point again
+and raises again until it is fixed, so one broken plugin's `ImportError`
+surfaces from every lookup. An `AttributeError` raised while importing is
+re-raised as `ImportError` naming the entry point, so `hasattr` and
+`getattr(Given, name, default)` do not hide it.
 
-`StepNotFound` and `AmbiguousStep` are both `AttributeError`s, so `hasattr` and
-`getattr(Given, name, default)` work. A module whose top-level name is also one
-of its own step names, such as module `login` with a step `login`, makes
-`Given.login` both a step and a namespace, which raises `AmbiguousStep`. Give
-the steps a short namespace instead.
+### Errors, names and introspection
+
+`StepNotFound` and `AmbiguousStep` are sibling `AttributeError`s, neither a
+kind of the other. `except StepNotFound` does not catch ambiguity, and
+`hasattr` and `getattr(Given, name, default)` treat both as absent.
+
+Lookups of names starting with `_` on `Given` raise a plain `AttributeError`.
+Below the root, a single-underscore segment is reachable, so a module
+`pkg._impl.steps` works as `Given.pkg._impl.steps.get`; dunder segments are
+not. A module run as `__main__` (a script, or a notebook) therefore has no
+reachable full path: its steps are found by bare name or a short namespace.
+
+`dir(Given)` and `dir(Given.http)` list only the names already registered; they
+do not load entry points.
+
+`Given`, `When`, `Then` and `And` are one object, and `Given.x = ...` raises
+`AttributeError`.

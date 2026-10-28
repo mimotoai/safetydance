@@ -11,16 +11,13 @@ kernelspec:
 
 | 0.3 | 0.4 |
 | --- | --- |
-| `@step` function, `Step` | a plain function |
+| `@step` function, `Step` | a plain function (0.5 brings back an optional `@step`, [see below](#from-safetydance-test-and-type-extensions)) |
 | `step_data(...)`, `ContextKey` | `ContextProperty`, or a `@context_data` class |
 | `@script`, `Script` | `@script` (alias `@context`); each call runs in a fresh `Context` |
 | `NestingContext` (nested scripts could read the caller's data) | gone: every script call is isolated; call a step to share |
 | `get_context()` found the `context` local of the calling script | `get_context()` returns the active `Context`; `NoActiveContext` outside one |
 | implicit context variables and AST rewriting | gone: read and write context data explicitly |
 | `safetydance.extensions`, `file_util`, `jupyter` | removed |
-
-The separate `safetydance-test` package's `scripted_test` corresponds to
-`@test_context` here, which puts pytest fixtures into the context by name.
 
 ## What to change
 
@@ -72,7 +69,7 @@ and need neither `safetydance-test` nor `type_extensions`:
 | old | new |
 | --- | --- |
 | `from safetydance_test import Given, When, Then, And` | `from safetydance import Given, When, Then, And` |
-| `@scripted_test` | `@test_context` |
+| `@scripted_test` | `@test_context`, which puts pytest fixtures into the context by name |
 | `step_extension(f, target_type=X)` | `@step` or `step_namespace("x")` in the step module |
 | `all_steps_as_step_extensions_from(module)` | `@step` on the module's steps, or `register_steps(*fns, namespace=...)` |
 | `type_extensions.extension_property` sub-prefixes (`Given.http`) | `step_namespace("http")` |

@@ -85,7 +85,9 @@ conversational style of programming
 `step_data` and `ContextKey` became `ContextProperty` and `@context_data`, and
 nested scripts no longer share a context. See the
 [migration guide](https://dcharbon.gitlab.io/safetydance/migrating/), or pin
-`safetydance<0.4` until you can migrate.
+`safetydance<0.4` until you can migrate. 0.5 brings back an optional `@step`, which
+only registers a plain function so `Given`, `When`, `Then` and `And` can find it; see
+[Given, When, Then](https://dcharbon.gitlab.io/safetydance/testing/#given-when-then).
 
 ## Future Work
 
