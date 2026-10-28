@@ -25,8 +25,25 @@ Context data
    :members: value, has_value
    :special-members: __call__, __setitem__
 
+Steps
+-----
+
+.. autofunction:: step
+.. autofunction:: step_namespace
+.. autofunction:: register_steps
+.. autofunction:: unregister_steps
+.. autoclass:: StepPrefix
+
+.. data:: Given
+          When
+          Then
+          And
+
+   One shared ``StepPrefix`` instance; the four names only change how a test reads.
+
 Errors
 ------
 
 .. autoexception:: NoActiveContext
 .. autoexception:: ContextDataNotSet
+.. autoexception:: StepNotFound

@@ -2,6 +2,32 @@
 safetydance Change Log
 ======================
 
+v0.5.0
+====================
+
+**Added:**
+
+* ``Given``, ``When``, ``Then`` and ``And`` look steps up by name. They are one
+  ``StepPrefix`` instance; the four names only change how a test reads.
+* ``step`` registers a function under its own name, ``step_namespace("a.b")``
+  makes a decorator that registers under a namespace, and
+  ``register_steps(*fns, namespace=None)`` registers from the caller's side. Each
+  registration binds one path.
+* ``unregister_steps(*steps)`` removes a step from every path it is registered
+  at, and namespaces left empty disappear.
+* ``StepNotFound``, an ``AttributeError``, is raised for a name nothing is
+  registered at. Names starting with ``_`` raise a plain ``AttributeError``.
+* Conflicts raise ``ValueError`` at registration, naming both steps. A module
+  imported twice under different names gets a hint saying so. Nothing is ever
+  replaced silently.
+
+**Changed:**
+
+* ``@step`` is back as an optional registrar; it never rewrites functions.
+* The prefixes now live in ``safetydance``, superseding the ``safetydance-test``
+  and ``type_extensions`` packages, which are no longer needed. See the
+  migration guide.
+
 v0.4.0
 ====================
 

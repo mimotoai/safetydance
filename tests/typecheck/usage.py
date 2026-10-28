@@ -3,7 +3,18 @@
 from collections.abc import Callable
 from typing import assert_type
 
-from safetydance import ContextProperty, context_data, get_context, initializer, script
+from safetydance import (
+    ContextProperty,
+    Given,
+    context_data,
+    get_context,
+    initializer,
+    register_steps,
+    script,
+    step,
+    step_namespace,
+    unregister_steps,
+)
 
 
 def format_total(total: float) -> str:
@@ -48,3 +59,34 @@ assert_type(checkout("Ada"), float)
 
 async def main() -> None:
     assert_type(await checkout_async("Ada"), float)
+
+
+@step
+def typed_step(x: int) -> str:
+    return str(x)
+
+
+assert_type(typed_step(1), str)
+
+
+@step_namespace("typed")
+def typed_ns_step(x: int) -> str:
+    return str(x)
+
+
+assert_type(typed_ns_step(1), str)
+
+register_steps(typed_step, namespace="other")
+unregister_steps(typed_step, typed_ns_step)
+
+
+def rejected_calls() -> None:
+    # Never called. `mypy --strict` warns on unused ignores, so each line must fail.
+    register_steps(1)  # type: ignore[arg-type]
+    register_steps(typed_step, namespace=1)  # type: ignore[arg-type]
+    unregister_steps("typed_step")  # type: ignore[arg-type]
+
+
+@script
+def uses_prefix() -> None:
+    Given.typed.typed_ns_step(1)  # Any: resolved by name at run time

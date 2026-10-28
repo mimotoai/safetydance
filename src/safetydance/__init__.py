@@ -8,4 +8,7 @@ finally:
     del version, PackageNotFoundError
 
 from ._safetydance import *
-from ._safetydance import __all__
+from ._steps import *
+from . import _safetydance, _steps
+
+__all__ = [*_safetydance.__all__, *_steps.__all__]
