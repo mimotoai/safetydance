@@ -12,6 +12,7 @@ from safetydance._steps import (
     StepNotFound,
     Then,
     When,
+    register_steps,
     step,
     step_namespace,
 )
@@ -188,6 +189,95 @@ def test_dir_lists_root_names():
     step(make_step("pkg_a.steps", "get"))
     assert {"get", "pkg_a"} <= set(dir(Given))
     assert "get" in dir(Given.pkg_a.steps)
+
+
+def test_explicit_registration_resolves_ambiguity():
+    step(make_step("pkg_a.steps", "get", "a"))
+    b_get = step(make_step("pkg_b.steps", "get", "b"))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    register_steps(b_get)
+    assert Given.get() == "b"
+
+
+def test_explicit_namespace_rehomes_a_step():
+    step(make_step("pkg_a.steps", "get", "a"))
+    b_get = step(make_step("pkg_b.steps", "get", "b"))
+    register_steps(b_get, namespace="other")
+    assert Given.other.get() == "b"
+    assert Given.pkg_a.steps.get() == "a"
+
+
+def test_explicit_beats_a_single_default():
+    step(make_step("pkg_a.steps", "get", "a"))
+    register_steps(make_step("pkg_b.steps", "get", "b"))
+    assert Given.get() == "b"
+
+
+def test_registration_without_step_decorator():
+    register_steps(make_step("m", "only", "o"), namespace="x")
+    assert Given.x.only() == "o"
+    with pytest.raises(StepNotFound):
+        Given.only
+
+
+def test_explicit_namespaces_appear_in_dir():
+    register_steps(make_step("m", "only"), namespace="x.y")
+    assert "x" in dir(Given)
+    assert "only" in dir(Given.x.y)
+
+
+def test_conflicting_explicit_registrations_raise():
+    a_get = make_step("pkg_a.steps", "get", "a")
+    b_get = make_step("pkg_b.steps", "get", "b")
+    register_steps(a_get)
+    with pytest.raises(ValueError, match=r"pkg_a\.steps\.get.*pkg_b\.steps\.get"):
+        register_steps(b_get)
+    assert Given.get() == "a"
+
+
+def test_repeating_an_explicit_registration_is_allowed():
+    a_get = make_step("pkg_a.steps", "get", "a")
+    register_steps(a_get)
+    register_steps(a_get)
+    assert Given.get() == "a"
+
+
+def test_register_steps_rejects_non_callables():
+    with pytest.raises(TypeError):
+        register_steps(1)
+
+
+def test_register_steps_rejects_private_names():
+    with pytest.raises(ValueError):
+        register_steps(make_step("m", "_hidden"))
+
+
+def test_register_steps_is_all_or_nothing():
+    a_get = make_step("pkg_a.steps", "get", "a")
+    with pytest.raises(TypeError):
+        register_steps(a_get, 1)
+    with pytest.raises(StepNotFound):
+        Given.get
+
+
+def test_register_steps_conflict_within_one_call_binds_nothing():
+    with pytest.raises(ValueError):
+        register_steps(make_step("pkg_a.steps", "get"), make_step("pkg_b.steps", "get"))
+    with pytest.raises(StepNotFound):
+        Given.get
+
+
+def test_register_steps_validates_namespace():
+    with pytest.raises(ValueError):
+        register_steps(make_step("pkg_a.steps", "get"), namespace="a..b")
+
+
+def test_ambiguity_hint_names_every_way_out():
+    step(make_step("pkg_a.steps", "get"))
+    step(make_step("pkg_b.steps", "get"))
+    with pytest.raises(AmbiguousStep, match=r"full module path.*namespace.*register_steps"):
+        Given.get
 
 
 count = ContextProperty[int](initializer=lambda ctx: 0)

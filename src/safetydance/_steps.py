@@ -121,6 +121,29 @@ class _Registry:
                 self._default.setdefault(path, {})[key] = f
                 self._add_prefixes(path)
 
+    def add_explicit(self, f: Callable[..., Any], namespace: _Path) -> None:
+        self.add_explicit_all([f], namespace)
+
+    def add_explicit_all(self, steps: list[Callable[..., Any]], namespace: _Path) -> None:
+        bindings = {}
+        for f in steps:
+            path = (*namespace, _step_name(f))
+            bindings.setdefault(path, []).append((_step_key(f), f))
+        with self._lock:
+            # Check every conflict before binding anything, so a failure binds nothing.
+            for path, items in bindings.items():
+                first = self._explicit.get(path) or items[0]
+                for key, f in items:
+                    if key != first[0]:
+                        raise ValueError(
+                            f"'{_dotted(path)}' is already registered to "
+                            f"{_full_name(first[1])}; cannot also register "
+                            f"{_full_name(f)} there."
+                        )
+            for path, items in bindings.items():
+                self._explicit[path] = items[-1]
+                self._add_prefixes(path)
+
     def resolve(self, path: _Path) -> Any:
         with self._lock:
             explicit = self._explicit.get(path)
@@ -132,7 +155,8 @@ class _Registry:
             candidates = ", ".join(_candidate_names(defaults))
             raise AmbiguousStep(
                 f"Step '{_dotted(path)}' is ambiguous; it could be any of: {candidates}. "
-                "Use the full module path to choose one."
+                "Use the full module path, a short namespace, or "
+                "register_steps(..., namespace=...) to choose one."
             )
         if defaults and is_namespace:
             raise AmbiguousStep(
@@ -241,6 +265,30 @@ def step_namespace(namespace: str) -> Callable[[F], F]:
         return f
 
     return register
+
+
+def register_steps(*steps: Callable[..., object], namespace: str | None = None) -> None:
+    """
+    Bind ``steps`` explicitly, ahead of every step registered with ``step``.
+
+    Each step is bound at its bare name, or under ``namespace`` when given, and
+    only there. Use it to settle a collision between steps from different
+    libraries::
+
+        register_steps(other_lib.get, namespace="other")
+
+        Given.other.get("/x")
+
+    The steps need not have been decorated with ``step``. Raises ``TypeError`` for
+    something that is not a named callable, and ``ValueError`` for an invalid
+    namespace, a name starting with ``_``, or a different step already bound at the
+    same path. Every argument is checked first, so a failed call registers nothing.
+    """
+    path = () if namespace is None else _namespace_path(namespace)
+    for f in steps:
+        if not callable(f):
+            raise TypeError(f"A step must be callable; got {f!r}.")
+    _registry.add_explicit_all(list(steps), path)
 
 
 Given = When = Then = And = StepPrefix()
