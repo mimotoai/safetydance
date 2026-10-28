@@ -311,7 +311,6 @@ def test_generator_finally_runs_in_context_on_close():
     assert seen == ["alive"]
 
 
-@pytest.mark.skipif(sys.version_info < (3, 13), reason="close() value is 3.13+")
 def test_generator_close_returns_value():
     @script
     def produce():
@@ -322,7 +321,61 @@ def test_generator_close_returns_value():
 
     gen = produce()
     next(gen)
-    assert gen.close() == "closing"
+    assert gen.close() == ("closing" if sys.version_info >= (3, 13) else None)
+
+
+def test_thrown_generator_exit_propagates_from_generator_script():
+    @script
+    def produce():
+        yield 1
+
+    gen = produce()
+    next(gen)
+    with pytest.raises(GeneratorExit):
+        gen.throw(GeneratorExit)
+
+
+def test_thrown_generator_exit_matches_native_when_body_returns_or_yields():
+    def native():
+        try:
+            yield
+        except GeneratorExit:
+            return "r"
+
+    def native_yield():
+        try:
+            yield
+        except GeneratorExit:
+            yield "y"
+
+    for fn in (native, native_yield):
+        expected = []
+        for make in (fn, script(fn)):
+            gen = make()
+            next(gen)
+            try:
+                expected.append(("value", gen.throw(GeneratorExit)))
+            except StopIteration as stop:
+                expected.append(("stop", stop.value))
+        assert expected[0] == expected[1]
+
+
+def test_generator_script_works_as_contextmanager_closed_early():
+    import contextlib
+
+    @contextlib.contextmanager
+    @script
+    def managed():
+        slot.value = "m"
+        yield slot.value
+
+    def consumer():
+        with managed():
+            yield
+
+    gen = consumer()
+    next(gen)
+    assert gen.close() is None
 
 
 def test_async_callable_object_is_an_async_script():
@@ -332,3 +385,48 @@ def test_async_callable_object_is_an_async_script():
             return slot.value
 
     assert asyncio.run(script(Job())()) == "x"
+
+
+def test_partial_of_async_function_is_an_async_script():
+    import functools
+
+    async def job(prefix):
+        slot.value = prefix
+        return slot.value
+
+    assert asyncio.run(script(functools.partial(job, "p"))()) == "p"
+
+
+def test_partial_of_generator_function_is_a_generator_script():
+    import functools
+
+    def gen_fn(prefix):
+        slot.value = prefix
+        yield slot.value
+
+    assert list(script(functools.partial(gen_fn, "g"))()) == ["g"]
+
+
+def test_async_mock_is_an_async_script():
+    from unittest.mock import AsyncMock
+
+    mock = AsyncMock(return_value="m")
+    assert asyncio.run(script(mock)()) == "m"
+
+
+def test_generator_callable_object_is_a_generator_script():
+    class Job:
+        def __call__(self):
+            slot.value = "x"
+            yield slot.value
+
+    assert list(script(Job())()) == ["x"]
+
+
+def test_async_generator_callable_object_is_rejected():
+    class Job:
+        async def __call__(self):
+            yield 1
+
+    with pytest.raises(TypeError):
+        script(Job())
