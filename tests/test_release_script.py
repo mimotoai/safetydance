@@ -2,7 +2,9 @@
 
 import importlib.util
 import io
+import json
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -234,3 +236,90 @@ def test_script_runs_against_this_repository(monkeypatch):
     project = release.pyproject_at(None)
     assert release.version_of(project) >= Version("0.3.0")
     assert "version" not in release.published_part(project)["project"]
+
+
+# --- network layer -----------------------------------------------------------
+
+
+class FakeResponse(io.BytesIO):
+    """What urlopen returns: readable by json.load and a context manager."""
+
+
+@pytest.fixture
+def urlopen(monkeypatch):
+    """Replace urllib.request.urlopen; set `.outcome` to a body dict or an exception."""
+    requests = []
+
+    class Fake:
+        outcome = {}
+
+        def __call__(self, request, timeout=None):
+            requests.append(request)
+            if isinstance(self.outcome, Exception):
+                raise self.outcome
+            return FakeResponse(json.dumps(self.outcome).encode())
+
+    fake = Fake()
+    fake.requests = requests
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return fake
+
+
+def test_released_versions_reads_versions_with_files(urlopen):
+    urlopen.outcome = {"releases": {"0.3.0": [{"f": 1}], "0.4.0": [], "0.2.0": [{}]}}
+    assert sorted(release.released_versions()) == [Version("0.2.0"), Version("0.3.0")]
+    assert urlopen.requests == [f"{release.PYPI}/safetydance/json"]
+
+
+def test_released_versions_is_empty_for_an_unpublished_project(urlopen):
+    urlopen.outcome = http_error(404)
+    assert release.released_versions() == []
+
+
+def test_released_versions_raises_server_errors(urlopen):
+    urlopen.outcome = http_error(500)
+    with pytest.raises(urllib.error.HTTPError) as info:
+        release.released_versions()
+    assert info.value.code == 500
+
+
+def test_is_released_is_true_for_a_published_version(urlopen):
+    assert release.is_released(Version("0.3.0")) is True
+    assert urlopen.requests == [f"{release.PYPI}/safetydance/0.3.0/json"]
+
+
+def test_is_released_is_false_for_a_missing_version(urlopen):
+    urlopen.outcome = http_error(404)
+    assert release.is_released(Version("9.9.9")) is False
+
+
+def test_is_released_raises_server_errors(urlopen):
+    urlopen.outcome = http_error(500)
+    with pytest.raises(urllib.error.HTTPError) as info:
+        release.is_released(Version("0.3.0"))
+    assert info.value.code == 500
+
+
+def test_gitlab_posts_json_with_the_job_token(urlopen, monkeypatch):
+    monkeypatch.setenv("CI_API_V4_URL", "https://gitlab.example/api/v4")
+    monkeypatch.setenv("CI_PROJECT_ID", "42")
+    monkeypatch.setenv("CI_JOB_TOKEN", "secret")
+    urlopen.outcome = {"ok": True}
+    body = {"tag_name": "v0.4.0"}
+    assert release.gitlab("POST", "/releases", body) == {"ok": True}
+    (request,) = urlopen.requests
+    assert request.full_url == "https://gitlab.example/api/v4/projects/42/releases"
+    assert request.get_method() == "POST"
+    assert request.get_header("Job-token") == "secret"
+    assert request.get_header("Content-type") == "application/json"
+    assert json.loads(request.data) == body
+
+
+def test_gitlab_get_sends_no_body(urlopen, monkeypatch):
+    monkeypatch.setenv("CI_API_V4_URL", "https://gitlab.example/api/v4")
+    monkeypatch.setenv("CI_PROJECT_ID", "42")
+    monkeypatch.setenv("CI_JOB_TOKEN", "secret")
+    release.gitlab("GET", "/releases/v0.4.0")
+    (request,) = urlopen.requests
+    assert request.data is None
+    assert request.get_method() == "GET"

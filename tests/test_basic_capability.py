@@ -1,6 +1,7 @@
+import asyncio
 import logging
 import pytest
-from safetydance import Context, ContextProperty, context
+from safetydance import Context, ContextProperty, context, get_context, test_context
 
 
 basic_data = ContextProperty[str]()
@@ -160,3 +161,32 @@ def test_context_tracing_with_logger_only(caplog):
     caplog.set_level(logging.INFO)
     basic_data.value = "traced"
     assert any("set by" in record.message for record in caplog.records)
+
+
+def test_tracing_log_level_is_used(caplog):
+    @context(tracing_logger=logging.getLogger("safetydance"), tracing_log_level=logging.DEBUG)
+    def run():
+        basic_data.value = "traced"
+
+    caplog.set_level(logging.DEBUG)
+    run()
+    records = [r for r in caplog.records if "set by" in r.message]
+    assert records
+    assert all(r.levelno == logging.DEBUG for r in records)
+
+
+def test_test_context_with_arguments():
+    @test_context
+    def run(a, b=2):
+        return get_context()["a"], get_context()["b"], a + b
+
+    assert run(a=1, b=5) == (1, 5, 6)
+
+
+def test_test_context_on_async_function():
+    @test_context
+    async def run(a):
+        await asyncio.sleep(0)
+        return get_context()["a"]
+
+    assert asyncio.run(run(a="x")) == "x"

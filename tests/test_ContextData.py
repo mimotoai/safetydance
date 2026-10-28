@@ -513,3 +513,69 @@ def test_mutable_dict_and_set_defaults_are_rejected(empty):
         @context_data
         class Shared:
             field: object = empty
+
+
+@context
+def test_initializer_receives_active_context():
+    @context_data
+    class Probe:
+        base: int
+        seen: int = initializer(lambda ctx: Probe.base + 1)
+        active: object = initializer(lambda ctx: ctx)
+
+    Probe.base = 4
+    assert Probe.seen == 5
+    assert Probe.active is safetydance.get_context()
+
+
+@context_data
+class Named:
+    value: int
+
+
+def test_stored_value_beats_name_supplied_value():
+    @safetydance.test_context
+    def run(value):
+        assert Named.value == value
+        Named.value = 2
+        assert Named.value == 2
+
+    run(value=1)
+
+
+def test_metaclass_used_directly():
+    class X(metaclass=safetydance.ContextData):
+        a: int = 1
+        b: int
+
+    @context
+    def run():
+        assert X.a == 1
+        X.a = 2
+        X.b = 3
+        return X.a, X.b
+
+    assert run() == (2, 3)
+
+    @context
+    def fresh():
+        return X.a
+
+    assert fresh() == 1
+
+
+def test_super_in_property_of_context_data_class():
+    class Base:
+        @property
+        def label(self):
+            return "base"
+
+    @context_data
+    class Child(Base):
+        value: int = 1
+
+        @property
+        def label(self):
+            return "child+" + super().label
+
+    assert Child().label == "child+base"
