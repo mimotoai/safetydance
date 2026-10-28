@@ -120,10 +120,14 @@ def test_call_not_found_raises_key_error():
         basic_data(Context())
 
 
-def test_call_runs_initializer_in_given_context():
+def test_call_runs_initializer_once_in_given_context():
+    calls = []
+    prop = ContextProperty[list](initializer=lambda ctx: calls.append(ctx) or [])
     ctx = Context()
-    assert data_with_initializer(ctx) == "initialized_value"
-    assert ctx[data_with_initializer] == "initialized_value"
+    first = prop(ctx)
+    assert prop(ctx) is first
+    assert calls == [ctx]
+    assert prop(Context()) is not first
 
 
 def test_setitem_sets_value_in_given_context():

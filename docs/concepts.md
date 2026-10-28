@@ -164,10 +164,9 @@ with ctx:  # make it the active context
 ## Subclasses and redeclared fields
 
 A subclass that redeclares a field shares the base class's value; only the
-default differs. In each context, the first read that finds no value stores the
-default of the class it reads through, and from then on reads through either
-class return that value. So which default you see depends on which class is read
-first.
+default differs. Until a value is stored, each class reads its own default, so
+the order of reads doesn't matter. Once a value is stored through either class,
+both read it.
 
 ```{code-cell} python
 @context_data
@@ -181,31 +180,19 @@ class Child(Base):
 
 
 @script
-def child_first():
-    return Child.level, Base.level
-
-
-@script
-def base_first():
-    return Base.level, Child.level
-
-
-assert child_first() == (2, 2)  # Child's default was stored for both
-assert base_first() == (1, 1)  # Base's default was stored for both
-
-
-@script
-def writes_through_base():
+def defaults_then_write():
+    assert (Base.level, Child.level) == (1, 2)  # each class's own default
     Base.level = 5
     assert Child.level == 5  # one value, whichever class writes it
 
 
-writes_through_base()
+defaults_then_write()
 ```
 
-A redeclared field without a default has nothing to store, so reading it through
-the subclass raises until a value is stored, for example by reading the base
-field.
+An `initializer()` default gives each class its own value until one is stored,
+and `del` through either class clears the stored value and both defaults. A
+redeclared field without a default raises until a value is stored, even when the
+base class has one.
 
 ```{code-cell} python
 @context_data
@@ -215,14 +202,15 @@ class NoDefaultChild(Base):
 
 @script
 def no_default():
+    assert Base.level == 1
     try:
         NoDefaultChild.level
     except ContextDataNotSet:
         pass
     else:
         raise AssertionError("expected ContextDataNotSet")
-    Base.level  # reading the base stores its default
-    assert NoDefaultChild.level == 1
+    Base.level = 3
+    assert NoDefaultChild.level == 3
 
 
 no_default()

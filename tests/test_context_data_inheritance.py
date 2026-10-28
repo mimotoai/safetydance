@@ -7,6 +7,7 @@ from safetydance import (
     ContextDataNotSet,
     NoActiveContext,
     context_data,
+    initializer,
     script,
 )
 from safetydance._safetydance import ContextPropertyDescriptor
@@ -76,7 +77,8 @@ def test_redeclared_field_shares_base_slot():
     @script
     def read_default():
         assert Rush.total == 3.0
-        assert Order.total == 3.0
+        with pytest.raises(ContextDataNotSet):
+            Order.total  # reading Rush's default stores nothing for Order
 
     assign()
     read_default()
@@ -92,7 +94,7 @@ class DeeperLevel(Level):
     level: int = 2
 
 
-def test_first_unset_read_stores_the_reading_class_default():
+def test_redeclared_fields_read_their_own_default_until_assigned():
     @script
     def child_first():
         return DeeperLevel.level, Level.level
@@ -101,8 +103,43 @@ def test_first_unset_read_stores_the_reading_class_default():
     def base_first():
         return Level.level, DeeperLevel.level
 
-    assert child_first() == (2, 2)
-    assert base_first() == (1, 1)
+    @script
+    def assigned():
+        Level.level = 5
+        return Level.level, DeeperLevel.level
+
+    assert child_first() == (2, 1)
+    assert base_first() == (1, 2)
+    assert assigned() == (5, 5)
+
+
+@context_data
+class Basket:
+    items: list[str] = initializer(lambda ctx: [])
+
+
+@context_data
+class GiftBasket(Basket):
+    items: list[str] = initializer(lambda ctx: ["card"])
+
+
+@script
+def test_redeclared_initializers_make_one_value_per_class():
+    GiftBasket.items.append("ribbon")
+    Basket.items.append("apple")
+    assert GiftBasket.items == ["card", "ribbon"]
+    assert Basket.items == ["apple"]
+    Basket.items = ["shared"]
+    assert GiftBasket.items == ["shared"]
+
+
+@script
+def test_del_redeclared_field_clears_every_class_default():
+    gift_items = GiftBasket.items
+    basket_items = Basket.items
+    del Basket.items
+    assert GiftBasket.items is not gift_items
+    assert Basket.items is not basket_items
 
 
 @context_data

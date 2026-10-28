@@ -12,6 +12,7 @@ from inspect import (
 )
 from logging import Logger
 from types import FrameType
+from weakref import WeakSet
 from typing import Any, Callable, ClassVar, Generic, ParamSpec, TypeVar, get_origin, overload
 
 if sys.version_info >= (3, 14):
@@ -92,6 +93,8 @@ class ContextProperty(Generic[T]):
     initializer: Callable[["Context"], T] | None
     declaring_cls: type | None
     _key: "ContextProperty"
+    _default_key: "_DefaultKey"
+    _sharing: "WeakSet[ContextProperty]"
 
     def __init__(
         self,
@@ -105,6 +108,10 @@ class ContextProperty(Generic[T]):
         self.initializer = initializer
         self.declaring_cls = declaring_cls
         self._key = self
+        self._default_key = _DefaultKey(self)
+        # The properties whose values are stored under this one: itself and, for a
+        # base class field, the subclass fields that redeclare it.
+        self._sharing = WeakSet([self])
 
     @property
     def value(self) -> T:
@@ -129,18 +136,23 @@ class ContextProperty(Generic[T]):
         self._set(context, new_value, sys._getframe(1))
 
     # Values are stored under _key (the property itself, or the base class's property
-    # for a redeclared field), so same-named properties never collide. The name is only
-    # a read fallback, which lets values supplied by name (e.g. test fixtures via
+    # for a redeclared field), so same-named properties never collide. Defaults are
+    # stored under _default_key, one per property, so a redeclared field reads its own
+    # class's default until a value is stored; that key is private, so it goes through
+    # the Context's storage rather than its typed mapping. The name is only a read
+    # fallback, which lets values supplied by name (e.g. test fixtures via
     # test_context) bind to the property.
     def _get(self, context: "Context", frame: FrameType) -> T:
         found = True
         if self._key in context:
             value = context[self._key]
+        elif self._default_key in context._data:
+            value = context._data[self._default_key]
         elif self.name and self.name in context:
             value = context[self.name]
         elif self.initializer is not None:
             value = self.initializer(context)
-            context[self._key] = value
+            context._data[self._default_key] = value
             context._trace(self, "initialized", frame)
         else:
             found = False
@@ -156,6 +168,8 @@ class ContextProperty(Generic[T]):
     def _unset(self, context: "Context", frame: FrameType):
         context._trace(self, "deleted", frame)
         context.pop(self._key, None)
+        for prop in list(self._key._sharing):
+            context._data.pop(prop._default_key, None)
 
     def __repr__(self) -> str:
         if self.name and self.declaring_cls:
@@ -176,8 +190,21 @@ class ContextProperty(Generic[T]):
         return bool(
             (self.name and self.name in context)
             or self._key in context
+            or self._default_key in context._data
             or self.initializer is not None
         )
+
+
+class _DefaultKey:
+    """Where a property's default is stored once read, apart from assigned values."""
+
+    __slots__ = ("prop",)
+
+    def __init__(self, prop: ContextProperty):
+        self.prop = prop
+
+    def __repr__(self) -> str:
+        return f"<default of {self.prop!r}>"
 
 
 class Context(MutableMapping[ContextProperty | str, Any]):
@@ -609,13 +636,14 @@ class ContextData(type):
     ``initializer()`` default on one raises ``TypeError``.
 
     A subclass that redeclares a field shares the base class's value; only the
-    default differs. In each context, the first read that finds no value stores the
-    default of the class it reads through, and reads through either class then
-    return it. So with ``level: int = 1`` on ``Base`` and ``level: int = 2`` on
-    ``Child(Base)``, reading ``Child.level`` first makes ``Base.level`` 2, and
-    reading ``Base.level`` first makes ``Child.level`` 1. A redeclared field with no
-    default raises until a value is stored. ``@context_data`` does the same for a
-    class defined without the metaclass.
+    default differs. Until a value is stored, each class reads its own default (an
+    ``initializer()`` gives each class its own value); once one is stored through
+    either class, both read it. So with ``level: int = 1`` on ``Base`` and
+    ``level: int = 2`` on ``Child(Base)``, ``Base.level`` is 1 and ``Child.level`` is
+    2 until ``Base.level = 5`` makes both 5. A redeclared field with no default
+    raises until a value is stored. ``del`` through either class clears the stored
+    value and both defaults. ``@context_data`` does the same for a class defined
+    without the metaclass.
     """
 
     def __new__(mcls, name, bases, namespace, **kwds):
@@ -650,6 +678,7 @@ class ContextData(type):
             if inherited is not None:
                 # D2: a redeclared field shares the base's value; only the default changes.
                 context_data._key = inherited.context_data._key
+                context_data._key._sharing.add(context_data)
             # Bypass ContextData.__setattr__, which would route to the descriptor.
             type.__setattr__(
                 ret, field_name, ContextPropertyDescriptor(field_name, context_data)
@@ -732,9 +761,8 @@ def context_data(cls: type[T]) -> type[T]:
     any other default is a constant. Unhashable defaults raise ``ValueError``, as
     with dataclasses.
 
-    A subclass that redeclares a field shares the base class's value. The first
-    read in a context that finds no value stores the default of the class it reads
-    through, for both classes (see ``ContextData``).
+    A subclass that redeclares a field shares the base class's value; until one is
+    stored, each class reads its own default (see ``ContextData``).
 
     The decorator rebuilds the class, so a base class's ``__init_subclass__`` runs
     again and class keywords are not carried over; use ``metaclass=ContextData`` for
