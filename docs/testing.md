@@ -155,9 +155,8 @@ that by not importing the module twice (check pytest's rootdir and import
 mode), or by giving the copies distinct namespaces. Closures made by one
 factory that capture different values are distinct steps too, so their bare
 names and full paths are ambiguous: register them explicitly, or give each a
-short namespace. If a closure step's captured value is rebound with `nonlocal`
-after registration, `unregister_steps` will not find it; register a fresh
-closure instead.
+short namespace. A registered step keeps its default and captured values alive
+until it is unregistered.
 
 Defining a step again at a different line, as reloading a module or re-running
 an edited notebook cell does, leaves the old one registered, so the name
