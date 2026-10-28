@@ -10,7 +10,9 @@ def test_star_import_exports_only_the_public_api():
     assert set(namespace) == {
         "Context",
         "ContextData",
+        "ContextDataNotSet",
         "ContextProperty",
+        "NoActiveContext",
         "context",
         "context_data",
         "get_context",

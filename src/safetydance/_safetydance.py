@@ -22,7 +22,9 @@ else:
 __all__ = [
     "Context",
     "ContextData",
+    "ContextDataNotSet",
     "ContextProperty",
+    "NoActiveContext",
     "context",
     "context_data",
     "get_context",
@@ -30,6 +32,18 @@ __all__ = [
     "script",
     "test_context",
 ]
+
+
+class NoActiveContext(RuntimeError):
+    """Raised when a Context is needed but none is active."""
+
+
+class ContextDataNotSet(KeyError, AttributeError):
+    """
+    Raised when a context value is read before it was set. It is also an
+    AttributeError so that hasattr() and getattr(default) work on context_data fields.
+    """
+
 
 T = TypeVar("T")
 P = ParamSpec("P")
@@ -85,7 +99,7 @@ class ContextProperty(Generic[T]):
             found = False
         context._trace(self, "retrieved", frame)
         if not found:
-            raise KeyError(f"ContextData {self} not found in Context")
+            raise ContextDataNotSet(f"ContextData {self} not found in Context")
         return value
 
     def _set(self, context: "Context", new_value: T, frame: FrameType):
@@ -181,12 +195,17 @@ _CURRENT_CONTEXT: ContextVar[Context | None] = ContextVar(
 
 def get_context() -> Context:
     """
-    Automatically retrieve and optionally create the context for use with step
-    functions.
+    Return the active Context, for use by step functions.
+
+    Raises NoActiveContext when called outside a @script (or @context) function or a
+    `with Context():` block.
     """
     current = _CURRENT_CONTEXT.get()
     if current is None:
-        raise Exception("No context set! Did you forget to use the @context decorator?")
+        raise NoActiveContext(
+            "No active context: call this from a @script (or @context) function, "
+            "or inside `with Context():`."
+        )
     return current
 
 
@@ -347,11 +366,18 @@ class ContextPropertyDescriptor:
         self.name = name
         self.context_data = context_data
 
+    # Pass the caller's frame so traces name the user's code, not this descriptor.
     def __get__(self, instance, owner=None):
-        return self.context_data.value
+        try:
+            context = get_context()
+        except NoActiveContext as e:
+            raise ContextDataNotSet(
+                f"ContextData {self.context_data} read outside a context"
+            ) from e
+        return self.context_data._get(context, sys._getframe(1))
 
     def __set__(self, instance, value):
-        self.context_data.value = value
+        self.context_data._set(get_context(), value, sys._getframe(1))
 
 
 class _Initializer:
@@ -405,7 +431,10 @@ class ContextData(type):
             if name in klass.__dict__:
                 attr = klass.__dict__[name]
                 if isinstance(attr, ContextPropertyDescriptor):
-                    return attr.__set__(self, value)
+                    # Called directly so the trace frame is the user's assignment.
+                    return attr.context_data._set(
+                        get_context(), value, sys._getframe(1)
+                    )
                 break
         # Fall back to normal attribute setting for attributes not managed by ContextData
         return super().__setattr__(name, value)

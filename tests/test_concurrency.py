@@ -5,7 +5,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from safetydance import Context, ContextProperty, get_context, script
+from safetydance import (
+    Context,
+    ContextProperty,
+    NoActiveContext,
+    get_context,
+    script,
+)
 
 
 slot = ContextProperty[str]()
@@ -47,7 +53,7 @@ def test_generator_script_context_does_not_leak_between_yields():
 
     gen = produce()
     next(gen)
-    with pytest.raises(Exception, match="No context set"):
+    with pytest.raises(NoActiveContext, match="No active context"):
         get_context()
     gen.close()
 
