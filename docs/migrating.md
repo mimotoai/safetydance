@@ -61,6 +61,9 @@ assert place_order() == ["tea"]
 assert place_order() == ["tea"]  # each call has a fresh context
 ```
 
+See the [concepts](concepts.md) for the details and the full list of changes
+in the [changelog](https://gitlab.com/dcharbon/safetydance/-/blob/main/CHANGELOG.rst).
+
 ## From safetydance-test and type_extensions
 
 The `Given`, `When`, `Then` and `And` prefixes now live in `safetydance` (0.5),
@@ -76,6 +79,3 @@ and need neither `safetydance-test` nor `type_extensions`:
 | `TestStepPrefix` | `StepPrefix` (no subclassing needed) |
 
 See [testing](testing.md#given-when-then) for how steps are found.
-
-See the [concepts](concepts.md) for the details and the full list of changes
-in the [changelog](https://gitlab.com/dcharbon/safetydance/-/blob/main/CHANGELOG.rst).
