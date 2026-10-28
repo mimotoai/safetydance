@@ -376,17 +376,23 @@ def test_concurrent_conflicts_are_detected_exactly_once():
     assert callable(Given.same)
 
 
-def test_same_instance_at_a_second_path_is_not_a_different_instance():
+def test_same_instance_structural_clash_is_not_a_different_instance():
     c = Pinger()
     register_steps(c.ping)
-    register_steps(c.ping, namespace="ping2")
-    register_steps(Pinger().ping, namespace="ping3")
     with pytest.raises(ValueError) as info:
-        register_steps(Pinger().ping, namespace="ping3")
-    assert "different instance" in str(info.value)
-    with pytest.raises(ValueError) as info:
-        register_steps(Pinger().ping.__func__, namespace="ping2")
+        register_steps(c.ping, namespace="ping")
     assert "different instance" not in str(info.value)
+    unregister_steps(c.ping)
+    register_steps(c.ping, namespace="ping")
+    with pytest.raises(ValueError) as info:
+        register_steps(c.ping)
+    assert "different instance" not in str(info.value)
+
+
+def test_different_instance_clash_gets_the_hint_at_a_namespace_too():
+    register_steps(Pinger().ping, namespace="ping3")
+    with pytest.raises(ValueError, match="different instance"):
+        register_steps(Pinger().ping, namespace="ping3")
 
 
 def _retry(f):
@@ -451,3 +457,36 @@ def test_mock_patch_object_on_a_prefix_fails_without_touching_the_registry():
         with mock.patch.object(Given, "x", 1):
             pass
     assert dir(Given) == ["get"]
+
+
+def _conflict_with(wrapped_property):
+    a = make_step("liba", "fetch")
+    b = make_step("libb", "fetch")
+    register_steps(a)
+    wrapped_property(b)
+    with pytest.raises(ValueError, match=r"already bound to liba\.fetch.*libb\.fetch"):
+        register_steps(b)
+
+
+def test_cyclic_wrapped_does_not_hide_the_conflict():
+    _conflict_with(lambda f: setattr(f, "__wrapped__", f))
+
+
+def test_raising_wrapped_property_does_not_hide_the_conflict():
+    class Boom:
+        def __init__(self, g):
+            self.g = g
+            self.__name__ = g.__name__
+            self.__module__ = g.__module__
+
+        @property
+        def __wrapped__(self):
+            raise RuntimeError("boom")
+
+        def __call__(self):
+            return self.g()
+
+    a = make_step("liba", "fetch")
+    register_steps(a)
+    with pytest.raises(ValueError, match=r"already bound to liba\.fetch.*libb\.fetch"):
+        register_steps(Boom(make_step("libb", "fetch")))

@@ -49,7 +49,12 @@ def _same(a: Any, b: Any) -> bool:
 
 def _code(f: Any) -> Any:
     # Unwrap decorators, so a shared ``functools.wraps`` wrapper does not stand for the step.
-    return getattr(unwrap(getattr(f, "__func__", f)), "__code__", None)
+    f = getattr(f, "__func__", f)
+    try:
+        f = unwrap(f)
+    except Exception:  # a cyclic or raising ``__wrapped__`` must not hide the conflict
+        pass
+    return getattr(f, "__code__", None)
 
 
 def _describe(f: Any) -> str:
@@ -272,7 +277,8 @@ def step_namespace(namespace: str) -> Callable[[F], F]:
     ``step_namespace("http")`` registers ``get`` as ``Given.http.get``, and
     ``step_namespace("my.pkg")`` as ``Given.my.pkg.get``. The namespace is
     validated now, not when the decorator is applied, and raises ``ValueError``
-    if a segment is not a public identifier. The decorated function is returned
+    if a segment is not a public identifier, and ``TypeError`` if ``namespace`` is
+    not a ``str``. The decorated function is returned
     unchanged.
     """
     if namespace is None:
@@ -296,7 +302,8 @@ def register_steps(*steps: Callable[..., object], namespace: str | None = None) 
     conflicts, nothing is bound. Registering the same step again does nothing; a
     different step at a taken path raises ``ValueError``. Bound methods are the
     same step when they share ``__self__`` and ``__func__``. Raises ``TypeError``
-    if called with no steps, or if a step is not callable or has no ``__name__``.
+    if called with no steps, if ``namespace`` is not a ``str`` or ``None``, or if a
+    step is not callable or has no ``__name__``.
     """
     if not steps:
         raise TypeError("register_steps() needs at least one step")
