@@ -156,22 +156,35 @@ def gitlab(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         return json.load(resp)
 
 
-def create_release() -> int:
-    version = version_of(pyproject_at(None))
-    tag, sha = f"v{version}", os.environ["CI_COMMIT_SHA"]
+def gitlab_get(path: str) -> Any:
+    """GET path from the GitLab API, or None if it doesn't exist."""
     try:
-        existing = gitlab("GET", f"/releases/{tag}")
+        return gitlab("GET", path)
     except urllib.error.HTTPError as error:
         error.close()
         if error.code != 404:
             raise
-    else:
+        return None
+
+
+def create_release() -> int:
+    version = version_of(pyproject_at(None))
+    tag, sha = f"v{version}", os.environ["CI_COMMIT_SHA"]
+    existing = gitlab_get(f"/releases/{tag}")
+    if existing is not None:
         if existing["commit"]["id"] != sha:
             print(f"Release {tag} already exists for {existing['commit']['id']},")
             print(f"not {sha}. Bump the version or delete that release and tag.")
             return 1
         print(f"Release {tag} already exists for this commit.")
         return 0
+    # GitLab ignores `ref` when the tag exists, so a tag pushed by hand (or left by a
+    # failed run) would otherwise get this release on whatever commit it points at.
+    existing_tag = gitlab_get(f"/repository/tags/{tag}")
+    if existing_tag is not None and existing_tag["commit"]["id"] != sha:
+        print(f"Tag {tag} already exists on {existing_tag['commit']['id']}, not {sha}.")
+        print("Bump the version or delete that tag.")
+        return 1
     gitlab(
         "POST",
         "/releases",
@@ -185,7 +198,8 @@ def create_release() -> int:
             ),
         },
     )
-    print(f"Created tag and release {tag} for {sha}.")
+    created = "release" if existing_tag is not None else "tag and release"
+    print(f"Created {created} {tag} for {sha}.")
     return 0
 
 

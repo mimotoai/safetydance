@@ -220,6 +220,22 @@ def test_create_release_refuses_a_tag_on_another_commit(gitlab, capsys):
     assert "already exists for def456" in capsys.readouterr().out
 
 
+def test_create_release_refuses_a_bare_tag_on_another_commit(gitlab, capsys):
+    calls, existing = gitlab
+    existing["/repository/tags/v0.4.0"] = {"commit": {"id": "def456"}}
+    assert release.main(["create-release"]) == 1
+    assert [c[0] for c in calls] == ["GET", "GET"]
+    assert "Tag v0.4.0 already exists on def456" in capsys.readouterr().out
+
+
+def test_create_release_attaches_to_a_bare_tag_on_this_commit(gitlab):
+    calls, existing = gitlab
+    existing["/repository/tags/v0.4.0"] = {"commit": {"id": "abc123"}}
+    assert release.main(["create-release"]) == 0
+    method, path, body = calls[-1]
+    assert (method, path, body["tag_name"]) == ("POST", "/releases", "v0.4.0")
+
+
 def test_create_release_raises_other_api_errors(gitlab, monkeypatch):
     def fail(method, path, body=None):
         raise http_error(403)
