@@ -324,11 +324,37 @@ class ContextData(type):
         return ret
 
     def __setattr__(self, name, value):
-        if name in self.__dict__:
-            return self.__dict__[name].__set__(self, value)
+        # Resolve the name the way attribute lookup does, so fields inherited from a
+        # base class are set in the context rather than shadowed on the subclass.
+        for klass in self.__mro__:
+            if name in klass.__dict__:
+                attr = klass.__dict__[name]
+                if isinstance(attr, ContextPropertyDescriptor):
+                    return attr.__set__(self, value)
+                break
+        # Fall back to normal attribute setting for attributes not managed by ContextData
+        return super().__setattr__(name, value)
+
+
+def _retarget_class_cells(old_cls: type, new_cls: type):
+    """
+    Point zero-argument super() at the rebuilt class. Methods compiled in the original
+    class body close over a __class__ cell holding the original class.
+    """
+    for attr in new_cls.__dict__.values():
+        if isinstance(attr, (classmethod, staticmethod)):
+            funcs = [attr.__func__]
+        elif isinstance(attr, property):
+            funcs = [attr.fget, attr.fset, attr.fdel]
         else:
-            # Fall back to normal attribute setting for attributes not managed by ContextData
-            return super().__setattr__(name, value)
+            funcs = [attr]
+        for func in funcs:
+            code = getattr(func, "__code__", None)
+            if code is None or "__class__" not in code.co_freevars:
+                continue
+            cell = func.__closure__[code.co_freevars.index("__class__")]
+            if cell.cell_contents is old_cls:
+                cell.cell_contents = new_cls
 
 
 def context_data(cls):
@@ -352,6 +378,9 @@ def context_data(cls):
 
     # Carry the annotations over explicitly (3.14+ stores them lazily)
     namespace["__annotations__"] = _own_annotations(cls)
+    namespace["__qualname__"] = cls.__qualname__
 
     # Create a new class with the same name, bases, and namespace, but with ContextData as metaclass
-    return ContextData(cls.__name__, cls.__bases__, namespace)
+    new_cls = ContextData(cls.__name__, cls.__bases__, namespace)
+    _retarget_class_cells(cls, new_cls)
+    return new_cls

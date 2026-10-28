@@ -294,3 +294,65 @@ def test_forward_reference_annotation_is_allowed():
 
     Pending.later = "value"
     assert Pending.later == "value"
+
+
+class Describable:
+    @classmethod
+    def describe(cls):
+        return f"base:{cls.__name__}"
+
+
+@context_data
+class Described(Describable):
+    label: str
+
+    @classmethod
+    def describe(cls):
+        return "sub+" + super().describe()
+
+
+def test_zero_arg_super_works_in_rebuilt_class():
+    assert Described.describe() == "sub+base:Described"
+
+
+def test_rebuilt_class_keeps_qualname():
+    @context_data
+    class Local:
+        value: str
+
+    assert Local.__qualname__.endswith("<locals>.Local")
+
+
+def test_subclass_assignment_of_inherited_field_goes_to_context():
+    class Child(Order):
+        pass
+
+    @context
+    def run():
+        Child.total = 7.0
+        assert Order.total == 7.0
+
+    run()
+    assert "total" not in Child.__dict__
+
+    @context
+    def next_run():
+        with pytest.raises(KeyError):
+            Child.total
+
+    next_run()
+
+
+def test_non_field_class_attribute_can_be_assigned():
+    @context_data
+    class Reassigned:
+        label: str
+
+        @classmethod
+        def describe(cls):
+            return "original"
+
+    Reassigned.describe = classmethod(lambda cls: "replaced")
+    Reassigned.extra = 1
+    assert Reassigned.describe() == "replaced"
+    assert Reassigned.extra == 1
