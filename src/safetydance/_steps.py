@@ -101,9 +101,12 @@ class _Registry:
         # Not called here: entry points are read lazily, on lookup.
         self._entry_points = entry_points
         self._lock = threading.Lock()
-        # Held while entry points load, never together with _lock: a loading module
-        # registers steps, which takes _lock. Reentrant, so a module may look steps
-        # up while it is being imported.
+        # Held while entry points load. Never acquired while _lock is held: a loading
+        # module registers steps, which takes _lock. Reentrant, so a module may look
+        # steps up while it is being imported. Known limit: if a module does a root
+        # lookup during its import while another thread loads an entry point that
+        # imports the same module, the two threads deadlock; once every entry point
+        # has loaded, the lock-free path rules this out.
         self._load_lock = threading.RLock()
         self._unloaded: list[Any] | None = None
         self._loading: set[int] = set()
@@ -133,7 +136,7 @@ class _Registry:
         self.add_explicit_all([f], namespace)
 
     def add_explicit_all(self, steps: list[Callable[..., Any]], namespace: _Path) -> None:
-        bindings = {}
+        bindings: dict[_Path, list[tuple[_Key, Callable[..., Any]]]] = {}
         for f in steps:
             path = (*namespace, _step_name(f))
             bindings.setdefault(path, []).append((_step_key(f), f))
