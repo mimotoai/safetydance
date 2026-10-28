@@ -33,6 +33,7 @@ def checkout(customer: str) -> float:
     assert_type(Shop.count, int)
     assert_type(Shop.formatter(1.0), str)
     assert_type(discount.value, float)
+    assert_type(discount.has_value, bool)
     assert_type(discount(get_context()), float)
     return sum(price for _, price in Shop.cart) * (1 - discount.value)
 

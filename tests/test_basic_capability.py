@@ -20,17 +20,17 @@ def test_context_data_not_found():
 
 
 @context
-def test_context_data_is_set():
-    assert not basic_data.is_set
+def test_context_data_has_value():
+    assert not basic_data.has_value
 
     basic_data.value = "value"
-    assert basic_data.is_set
+    assert basic_data.has_value
     assert basic_data.value == "value"
 
 
 @context
 def test_context_get_with_initializer():
-    assert data_with_initializer.is_set
+    assert data_with_initializer.has_value
     assert data_with_initializer.value == "initialized_value"
 
 
@@ -51,7 +51,7 @@ def test_step_usage():
     assert result == "value1-value2"
 
     # Verify that the context was added to the frame locals
-    assert some_context_data.is_set
+    assert some_context_data.has_value
     assert some_context_data.value == "foo"
 
 
@@ -64,11 +64,11 @@ def test_step_with_context_data():
     # Create a step function that uses the context
     def set_test_data():
         test_data.value = "test_value"
-        assert test_data.is_set
+        assert test_data.has_value
 
     # Create another step function that uses the same context
     def get_test_data():
-        assert test_data.is_set
+        assert test_data.has_value
         assert test_data.value == "test_value"
 
     # Test the integration
@@ -137,7 +137,7 @@ def test_setitem_sets_value_in_given_context():
 def test_call_and_setitem_ignore_active_context():
     other = Context()
     basic_data[other] = "other"
-    assert not basic_data.is_set
+    assert not basic_data.has_value
 
     basic_data.value = "active"
     assert basic_data(other) == "other"

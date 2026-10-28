@@ -136,7 +136,7 @@ def test_concurrent_nested_async_scripts_are_independent():
 def test_generator_script_started_inside_a_script_is_isolated():
     @script
     def produce():
-        assert not slot.is_set
+        assert not slot.has_value
         slot.value = "inner"
         yield slot.value
 

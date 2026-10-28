@@ -15,14 +15,14 @@ fixture_data = ContextProperty[str](name="fixture_value")
 def test_nested_context_writes_are_not_visible_in_parent():
     with Context():
         nested_data.value = "inner"
-    assert not nested_data.is_set
+    assert not nested_data.has_value
 
 
 @context
 def test_nested_context_does_not_see_parent_values():
     nested_data.value = "outer"
     with Context():
-        assert not nested_data.is_set
+        assert not nested_data.has_value
 
 
 @context
@@ -40,7 +40,7 @@ def test_each_level_of_nesting_is_isolated():
     with Context():
         nested_data.value = "middle"
         with Context():
-            assert not nested_data.is_set
+            assert not nested_data.has_value
             nested_data.value = "innermost"
         assert nested_data.value == "middle"
     assert nested_data.value == "outer"
@@ -50,7 +50,7 @@ def test_each_level_of_nesting_is_isolated():
 def test_nested_script_is_isolated_from_calling_script():
     @context
     def nested_script():
-        assert not nested_data.is_set
+        assert not nested_data.has_value
         nested_data.value = "from nested script"
         return nested_data.value
 
@@ -92,7 +92,7 @@ def test_nested_test_context_fixtures_stay_in_nested_context():
         assert fixture_data.value == "fixture"
 
     inner(fixture_value="fixture")
-    assert not fixture_data.is_set
+    assert not fixture_data.has_value
 
 
 def test_explicit_access_through_nested_context_is_isolated():

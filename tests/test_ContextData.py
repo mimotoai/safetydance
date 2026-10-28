@@ -63,7 +63,6 @@ def test_step_usage():
     assert result == "value1-value2"
 
     # Verify that the context was added to the frame locals
-    # assert TestData.is_set("basic")
     assert TestData.basic == "foo"
 
 

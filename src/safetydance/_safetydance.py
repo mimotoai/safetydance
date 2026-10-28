@@ -113,9 +113,9 @@ class ContextProperty(Generic[T]):
             return super().__repr__()
 
     @property
-    def is_set(self):
+    def has_value(self) -> bool:
         context = get_context()
-        return (
+        return bool(
             (self.name and self.name in context)
             or self in context
             or self.initializer is not None
@@ -158,6 +158,13 @@ class Context(MutableMapping[ContextProperty | str, Any]):
 
     def __repr__(self) -> str:
         return f"Context({self._data!r})"
+
+    # Identity, not Mapping's value equality: a Context is a scope, and it must stay
+    # hashable so it can key dicts and sets.
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    __hash__ = object.__hash__
 
     def __enter__(self) -> "Context":
         parent = _CURRENT_CONTEXT.get()
@@ -275,6 +282,14 @@ def _in_new_context(
     return wrapper
 
 
+def _require_callable(name: str, func: Any) -> None:
+    if func is not None and not callable(func):
+        raise TypeError(
+            f"@{name} got {func!r} as its function; the tracing options are "
+            f"keyword-only, e.g. @{name}(tracing_log_level=...)"
+        )
+
+
 def _context_factory(
     tracing_log_level: int | None,
     tracing_logger: Logger | None,
@@ -298,6 +313,7 @@ def _context_factory(
 @overload
 def context(
     func: Callable[P, R],
+    *,
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ) -> Callable[P, R]: ...
@@ -306,6 +322,7 @@ def context(
 @overload
 def context(
     func: None = None,
+    *,
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
@@ -313,15 +330,17 @@ def context(
 
 def context(
     func: Callable[..., Any] | None = None,
+    *,
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ) -> Any:
+    _require_callable("context", func)
     make_context = _context_factory(tracing_log_level, tracing_logger, False)
 
     def decorator(func):
         return _in_new_context(func, make_context)
 
-    return decorator(func) if func else decorator
+    return decorator(func) if func is not None else decorator
 
 
 script = context
@@ -330,6 +349,7 @@ script = context
 @overload
 def test_context(
     func: Callable[P, R],
+    *,
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ) -> Callable[P, R]: ...
@@ -338,6 +358,7 @@ def test_context(
 @overload
 def test_context(
     func: None = None,
+    *,
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
@@ -345,16 +366,18 @@ def test_context(
 
 def test_context(
     func: Callable[..., Any] | None = None,
+    *,
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ) -> Any:
     """Grab the test fixtures and put them into the Context."""
+    _require_callable("test_context", func)
     make_context = _context_factory(tracing_log_level, tracing_logger, True)
 
     def decorator(func):
         return _in_new_context(func, make_context)
 
-    return decorator(func) if func else decorator
+    return decorator(func) if func is not None else decorator
 
 
 # The name starts with "test", so stop pytest collecting it wherever it is imported.
@@ -462,7 +485,7 @@ def _retarget_class_cells(old_cls: type, new_cls: type):
                 cell.cell_contents = new_cls
 
 
-def context_data(cls):
+def context_data(cls: type[T]) -> type[T]:
     """
     Class decorator that sets the metaclass of the decorated class to ContextData.
 
@@ -490,6 +513,6 @@ def context_data(cls):
     namespace["__qualname__"] = cls.__qualname__
 
     # Create a new class with the same name, bases, and namespace, but with ContextData as metaclass
-    new_cls = ContextData(cls.__name__, cls.__bases__, namespace)
+    new_cls: type[T] = ContextData(cls.__name__, cls.__bases__, namespace)  # type: ignore[assignment]
     _retarget_class_cells(cls, new_cls)
     return new_cls
