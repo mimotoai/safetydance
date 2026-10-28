@@ -1,4 +1,5 @@
 import keyword
+import sys
 import threading
 from importlib.metadata import entry_points
 from inspect import ismethod
@@ -25,8 +26,9 @@ ENTRY_POINT_GROUP = "safetydance.steps"
 
 _Path = tuple[str, ...]
 _Key = tuple[Any, ...]
-# One registration, (tier, path, key), as recorded while an entry point loads.
-_Record = tuple[str, _Path, _Key]
+# One registration, (tier, path, key, step module), as recorded while an entry
+# point loads.
+_Record = tuple[str, _Path, _Key, str]
 
 
 class StepNotFound(AttributeError):
@@ -231,11 +233,11 @@ class _Registry:
             journals = self._local.journals = []
         return journals
 
-    def _record(self, tier: str, path: _Path, key: _Key) -> None:
+    def _record(self, tier: str, path: _Path, key: _Key, module: str) -> None:
         # Thread-local, so another thread's registrations never count as the load's.
         journals = self._journals()
         if journals:
-            journals[-1].append((tier, path, key))
+            journals[-1].append((tier, path, key, module))
 
     def add_default(self, f: Callable[..., Any], namespace: _Path | None) -> None:
         name = _step_name(f)
@@ -247,7 +249,7 @@ class _Registry:
             for path in paths:
                 registered = self._default.setdefault(path, {})
                 if key not in registered:
-                    self._record("default", path, key)
+                    self._record("default", path, key, f.__module__)
                 # The same step registered again replaces the stored object.
                 registered[key] = f
                 self._add_prefixes(path)
@@ -263,7 +265,7 @@ class _Registry:
                 self._check_explicit(path, items)
             for path, items in bindings.items():
                 if path not in self._explicit:
-                    self._record("explicit", path, items[-1][0])
+                    self._record("explicit", path, items[-1][0], items[-1][1].__module__)
                 self._explicit[path] = items[-1]
                 self._add_prefixes(path)
 
@@ -302,7 +304,11 @@ class _Registry:
 
     def _roll_back(self, records: list[_Record]) -> None:
         with self._lock:
-            for tier, path, key in records:
+            for tier, path, key, module in records:
+                # A module that imported along the way stays imported, so a retry
+                # would not register its steps again; only failed modules' steps go.
+                if module in sys.modules:
+                    continue
                 if tier == "explicit":
                     bound = self._explicit.get(path)
                     if bound is not None and bound[0] == key:
@@ -323,7 +329,7 @@ class _Registry:
         try:
             ep.load()
         except BaseException as e:
-            # So that a retry registers the module's steps afresh.
+            # So that a retry registers the failed modules' steps afresh.
             self._roll_back(records)
             where = f"entry point {ep.name!r} ({ep.value}) in group {ENTRY_POINT_GROUP!r}"
             if isinstance(e, AttributeError):
@@ -582,8 +588,11 @@ def unregister_steps(*steps: Callable[..., object]) -> None:
     it is the same step as one given, in the sense that ``step`` describes. A step
     that is not registered is ignored. Raises ``TypeError`` for something that is
     not callable; every argument is checked first, so a failed call removes
-    nothing.
+    nothing. Raises ``TypeError`` when no step is given, as ``register_steps``
+    does.
     """
+    if not steps:
+        raise TypeError("unregister_steps() needs at least one step.")
     _check_callables(steps)
     _registry.remove({_step_key(f) for f in steps})
 

@@ -326,70 +326,142 @@ def registry_state():
     return registry._explicit, registry._default, registry._children
 
 
-def test_failed_load_removes_what_it_registered(installed):
-    def load():
-        step_namespace("flaky")(make_bound_step())
-        register_steps(make_bound_step(), namespace="chosen")
-        raise ImportError("boom")
+def flaky_source(marker=None, error="boom"):
+    """A steps module that registers, then fails (until ``marker`` exists)."""
+    check = "True" if marker is None else f"not os.path.exists({str(marker)!r})"
+    # The module-level list is made afresh on each import and is unhashable, so
+    # each import's steps are distinct steps.
+    return (
+        "import os\n"
+        "from safetydance import register_steps, step_namespace\n"
+        "items = []\n"
+        "@step_namespace('flaky')\n"
+        "def fetch():\n"
+        "    return items\n"
+        "def pick():\n"
+        "    return items\n"
+        "register_steps(pick, namespace='chosen')\n"
+        f"if {check}:\n"
+        f"    raise ImportError({error!r})\n"
+    )
 
-    installed.entry_points[:] = [FakeEntryPoint("flaky", load)]
+
+def test_failed_load_removes_what_it_registered(installed, add_entry_point):
+    installed.entry_points.clear()
+    add_entry_point("flaky", "sd_ep_flaky", flaky_source())
     with pytest.raises(ImportError, match="boom"):
         Given.flaky
+    assert "sd_ep_flaky" not in sys.modules
     assert registry_state() == ({}, {}, {})
     assert dir(Given) == []
 
 
-def test_failed_load_keeps_steps_other_threads_register(installed):
+def test_failed_load_keeps_steps_other_threads_register(installed, add_entry_point):
+    installed.entry_points.clear()
+    flaky = add_entry_point("flaky", "sd_ep_flaky", flaky_source())
+    import_flaky = flaky._load
+
     def register_elsewhere():
-        @step_namespace("elsewhere")
-        def ping():
-            return "elsewhere"
+        # Its module is not imported, so the step stays only because another
+        # thread's registrations are not recorded as the load's.
+        step_namespace("elsewhere")(make_step_in("sd_ep_elsewhere", "ping"))
 
     def load():
-        step_namespace("flaky")(make_bound_step())
         thread = threading.Thread(target=register_elsewhere, daemon=True)
         thread.start()
         thread.join(timeout=5)
-        raise ImportError("boom")
+        return import_flaky()
 
-    installed.entry_points[:] = [FakeEntryPoint("flaky", load)]
+    flaky._load = load
     with pytest.raises(ImportError, match="boom"):
         Given.flaky
     _, default, _ = registry_state()
     assert ("elsewhere", "ping") in default
-    assert ("flaky", "get") not in default
+    assert ("flaky", "fetch") not in default
 
 
-def make_bound_step():
-    # Captures a fresh list, which is unhashable, so each call is a distinct step.
-    items = []
-
-    def get():
-        return items
-
-    return get
+def make_step_in(module, name):
+    """A function whose __module__ is ``module``, a module that is not imported."""
+    namespace = {"__name__": module}
+    exec(f"def {name}():\n    return {name!r}\n", namespace)
+    return namespace[name]
 
 
-def test_retry_after_a_failed_load_registers_cleanly(installed):
-    attempts = []
-
+def test_steps_of_a_module_not_imported_are_rolled_back_from_other_loads(installed):
+    # The rule is by module: a step whose module is not in sys.modules goes.
     def load():
-        attempts.append(None)
-        get = make_bound_step()
-        step_namespace("flaky")(get)
-        register_steps(get, namespace="chosen")
-        if len(attempts) == 1:
-            raise ImportError("transient")
+        step_namespace("ghost")(make_step_in("sd_ep_never_imported", "ping"))
+        raise ImportError("boom")
 
-    flaky = FakeEntryPoint("flaky", load)
-    installed.entry_points[:] = [flaky]
+    installed.entry_points[:] = [FakeEntryPoint("ghost", load)]
+    with pytest.raises(ImportError, match="boom"):
+        Given.ghost
+    assert registry_state() == ({}, {}, {})
+
+
+def test_retry_after_a_failed_load_registers_cleanly(installed, add_entry_point, tmp_path):
+    installed.entry_points.clear()
+    marker = tmp_path / "flaky-may-load"
+    flaky = add_entry_point("flaky", "sd_ep_flaky", flaky_source(marker, "transient"))
     with pytest.raises(ImportError, match="transient"):
         Given.flaky
-    # Without the rollback, the second attempt's step would conflict with the first.
-    assert Given.chosen.get() == []
-    assert Given.flaky.get is Given.chosen.get
-    assert Given.get is Given.chosen.get
+    marker.touch()
+    # Without the rollback, the second import's steps would conflict with the first.
+    assert Given.chosen.pick() == []
+    assert Given.flaky.fetch() is Given.chosen.pick()
+    assert Given.fetch is Given.flaky.fetch
     assert flaky.loads == 2
+
+
+@pytest.fixture
+def package(installed, tmp_path):
+    """A package whose __init__ imports a good submodule, then fails until fixed."""
+    marker = tmp_path / "pkg-may-load"
+    root = tmp_path / "sd_ep_pkg"
+    root.mkdir()
+    (root / "good.py").write_text(
+        "from safetydance import step_namespace\n"
+        "@step_namespace('good')\n"
+        "def ping():\n"
+        "    return 'good'\n"
+    )
+    (root / "__init__.py").write_text(
+        "import os\n"
+        "from safetydance import step_namespace\n"
+        "from sd_ep_pkg import good\n"
+        "@step_namespace('own')\n"
+        "def run():\n"
+        "    return 'own'\n"
+        f"if not os.path.exists({str(marker)!r}):\n"
+        "    raise ImportError('pkg fails')\n"
+    )
+    importlib.invalidate_caches()
+    entry_point = FakeEntryPoint("pkg", lambda: importlib.import_module("sd_ep_pkg"))
+    installed.entry_points[:] = [entry_point]
+    yield entry_point, marker
+    for module in ["sd_ep_pkg", "sd_ep_pkg.good"]:
+        sys.modules.pop(module, None)
+
+
+def test_failed_load_keeps_steps_from_modules_that_imported(package):
+    entry_point, marker = package
+    with pytest.raises(ImportError, match="pkg fails"):
+        Given.good
+    # The import system dropped the failed package but kept its good submodule,
+    # which will not run again, so only the package's own step is rolled back.
+    assert "sd_ep_pkg" not in sys.modules
+    assert "sd_ep_pkg.good" in sys.modules
+    _, default, _ = registry_state()
+    assert ("good", "ping") in default
+    assert ("own", "run") not in default
+    marker.touch()
+    assert Given.good.ping() == "good"
+    assert Given.ping() == "good"
+    assert Given.own.run() == "own"
+    _, default, _ = registry_state()
+    assert len(default[("ping",)]) == 1
+    assert len(default[("run",)]) == 1
+    assert entry_point.loads == 2
 
 
 def test_failed_load_keeps_steps_of_a_nested_load_that_succeeded(add_entry_point, tmp_path):

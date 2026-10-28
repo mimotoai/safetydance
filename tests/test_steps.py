@@ -723,8 +723,12 @@ def test_unregister_keeps_other_steps():
 def test_unregister_unknown_step_is_a_no_op():
     step(make_step("pkg_a.steps", "get", "a"))
     unregister_steps(make_step("pkg_b.steps", "get"), fetch)
-    unregister_steps()
     assert Given.get() == "a"
+
+
+def test_unregister_steps_needs_a_step():
+    with pytest.raises(TypeError, match="at least one step"):
+        unregister_steps()
 
 
 def test_unregister_rejects_non_callables_and_removes_nothing():
