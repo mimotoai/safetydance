@@ -412,7 +412,10 @@ def test_root_underscore_names_are_hidden_from_dir():
     assert type(err.value) is AttributeError
 
 
-@pytest.mark.parametrize("module", ["__main__", "_private.steps", "pkg.__main__"])
+@pytest.mark.parametrize(
+    "module",
+    ["__main__", "_private.steps", "pkg.__main__", "my-steps", "<run_path>", "pkg.class.steps"],
+)
 def test_ambiguity_never_advises_a_full_path_that_cannot_be_typed(module):
     step(make_step(module, "http"))
     step_namespace("http")(make_step("n", "get"))
@@ -829,3 +832,12 @@ def test_full_path_is_advised_when_it_does_not_pass_through_the_name():
         Given.x.get
     assert "step_namespace" not in str(err.value)
     assert Given.x.y.get() == "xy"
+
+
+# Review fixes: paths a message may advise, and namespace internals.
+
+
+def test_path_segment_named_like_the_namespace_slot_resolves():
+    step(make_step("pkg._path.steps", "get", "p"))
+    assert Given.pkg._path.steps.get() == "p"
+    assert "_path" in dir(Given.pkg)

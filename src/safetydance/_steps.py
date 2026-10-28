@@ -171,7 +171,11 @@ def _full_name(f: Callable[..., Any]) -> str:
 
 def _reachable(path: _Path) -> bool:
     """Whether ``path`` can be typed as attribute lookups on a prefix."""
-    return not path[0].startswith("_") and not any(_is_dunder(s) for s in path)
+    return (
+        not path[0].startswith("_")
+        and all(s.isidentifier() and not keyword.iskeyword(s) for s in path)
+        and not any(_is_dunder(s) for s in path)
+    )
 
 
 def _advisable(full: _Path, path: _Path) -> bool:
@@ -486,23 +490,24 @@ class StepPrefix:
 
 
 class _StepNamespace:
-    # The path is private so that every public name reaches __getattr__.
-    __slots__ = ("_path",)
+    # A dunder, which lookups refuse, so that every other name reaches __getattr__,
+    # including a module path segment such as _path.
+    __slots__ = ("__sd_path__",)
 
     def __init__(self, path: _Path):
-        self._path = path
+        self.__sd_path__ = path
 
     def __getattr__(self, name: str) -> Any:
         # A module path may have single-underscore segments, like _impl.
         if _is_dunder(name):
             raise _no_attribute(self, name)
-        return _registry.resolve((*self._path, name), self)
+        return _registry.resolve((*self.__sd_path__, name), self)
 
     def __dir__(self) -> list[str]:
-        return _registry.child_names(self._path)
+        return _registry.child_names(self.__sd_path__)
 
     def __repr__(self) -> str:
-        return f"<step namespace '{_dotted(self._path)}'>"
+        return f"<step namespace '{_dotted(self.__sd_path__)}'>"
 
 
 def step(f: F) -> F:
