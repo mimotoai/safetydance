@@ -22,12 +22,13 @@ v0.5.0
   naming it. Only registrations made by modules whose import failed are rolled
   back. One broken plugin's ``ImportError`` surfaces from lookups until it is
   fixed.
-* A step's identity covers its definition location, wrapper chain and default
-  and captured values. Module-level functions and classes in a default or
-  captured value are compared by file and name, so a module imported twice is
-  one step unless a value compares by identity (an ``object()`` sentinel, an
-  instance, a ``functools.partial`` or an ``Enum`` member), when each copy is a
-  different step and its bare name is ambiguous.
+* A step's identity covers its definition location, the location of each layer
+  of its ``functools.wraps`` chain, and its default and captured values.
+  Values compare by value only when they are exactly ``int``, ``bool``,
+  ``float``, ``complex``, ``str``, ``bytes`` or ``None``, or a tuple or
+  frozenset of those; every other value compares by object identity and is
+  never hashed or inspected, so lazy objects are safe as defaults. A module
+  imported twice is one step only when its values are such builtins.
   Error messages suggest a full module path only when it can be typed.
 * ``StepNotFound`` and ``AmbiguousStep`` are sibling ``AttributeError`` s
   (neither is a kind of the other) that report a missing name or one that could

@@ -136,34 +136,28 @@ module `login` with a step `login`. A short namespace makes `Given.greeting.x`
 reachable, but the bare `Given.x` stays ambiguous unless it is bound with
 `register_steps`.
 
-A step is identified by where it is defined, so loading one module under two
-names is still one step. For a function that is its definition location (file,
-line and qualified name) and code, its wrapper chain (each `functools.wraps`
-layer counts) and its default and captured values. Closures are identified by
-their code and captured values, bound methods by their instance, and other
-callables (classes, instances) by object identity.
+A step is identified by its definition location (file, line, qualified name
+and code), the location of each layer of its `functools.wraps` chain, and its
+default and captured values. Bound methods are identified by their instance.
 
-Default and captured values are compared so that a module imported twice
-still gives one step, where that can be done safely:
+Values compare by value only when they are exactly `int`, `bool`, `float`,
+`complex`, `str`, `bytes` or `None`, or a tuple or frozenset of those, so `1`
+and `True`, or `(1,)` and `(1.0,)`, stay distinct. Every other value
+(functions, classes, instances, sentinels, `Decimal`, `Enum` members,
+partials) compares by object identity, and is never hashed, compared or
+inspected. That makes lazy objects, such as Django's `settings`, safe to use
+as defaults.
 
-* a module-level function that is not a lambda is recognised by its module
-  file and qualified name;
-* a lambda or a function defined inside another is recognised by its code,
-  defaults and captured values;
-* a module-level class whose module has a real file is recognised by that file
-  and its qualified name; a local class, or one from exec'd code, by object
-  identity;
-* any other hashable value compares by type and value, so `1` and `True`, or
-  `(1,)` and `(1.0,)`, stay distinct; anything else by object identity.
-
-So when a step module is imported twice, a step whose default or captured
-value is an `object()` sentinel, an instance, a `functools.partial` or an
-`Enum` member is a different step in each copy, and its bare name and short
-namespace path raise `AmbiguousStep`. Fix that by not importing the module
-twice (check pytest's rootdir and import mode), or by giving the copies
-distinct namespaces. Closures made by one factory that capture different
-values are distinct steps too, so their bare names and full paths are
-ambiguous: register them explicitly, or give each a short namespace.
+So when a step module is imported twice, a step whose defaults or captured
+values include anything other than those builtins is a different step in each
+copy, and its bare name and short namespace path raise `AmbiguousStep`. Fix
+that by not importing the module twice (check pytest's rootdir and import
+mode), or by giving the copies distinct namespaces. Closures made by one
+factory that capture different values are distinct steps too, so their bare
+names and full paths are ambiguous: register them explicitly, or give each a
+short namespace. If a closure step's captured value is rebound with `nonlocal`
+after registration, `unregister_steps` will not find it; register a fresh
+closure instead.
 
 Defining a step again at a different line, as reloading a module or re-running
 an edited notebook cell does, leaves the old one registered, so the name
