@@ -7,20 +7,58 @@ steps. The design of safetydance is partially inspired by `<https://cucumber.io>
 
 ## Description
 
-`safetydance` defines a set of decorators that rewrite functions as steps and scripts.
+`safetydance` lets plain functions act as *steps* that share data through an execution
+context, and provides decorators that turn a function into a *script*, which runs its
+steps in a fresh context.
 
 A step should be a function with a name that reads easily, like a short phrase or
 sentence. Steps may take arguments and they may access variables defined for the
 "context scope". Steps may call other steps, too.
 
-A script is a function composing the execution of a series of steps. A script is a step
-that defines an execution context. Scripts may also call other scripts. The primary
-difference between a script and a step is the implicit definition of the execution
-context. *TODO* When a script calls another script the current execution context *may*
-be passed as a kwarg to the nested script; by default all scripts execute in their own
-execution context; that is, if a step is used by both an originating and a nested script
-the context variables it accesses are determined by the calling script's execution
-context.
+A script is a function, decorated with `@script`, composing the execution of a series of
+steps. Each call to a script runs in its own execution context, so scripts never see each
+other's context data: not when one script calls another, and not when scripts run
+concurrently in asyncio tasks. Generator and `async` functions can be scripts, too.
+
+To share context, call a step rather than a script; a step always uses its caller's
+context. A flow that is useful both on its own and inside larger scripts can be written
+as a step and wrapped once, e.g. `log_in_script = script(log_in)`.
+
+```python
+from safetydance import context_data, initializer, script
+
+
+@context_data
+class Shop:
+    customer: str
+    cart: list[tuple[str, float]] = initializer(lambda ctx: [])
+    total: float = 0.0
+
+
+def customer_named(name: str):
+    Shop.customer = name
+
+
+def adds_to_cart(item: str, price: float):
+    Shop.cart.append((item, price))
+
+
+def checks_out():
+    Shop.total = sum(price for _, price in Shop.cart)
+
+
+@script
+def buy_breakfast() -> float:
+    customer_named("Ada")
+    adds_to_cart("coffee", 3.50)
+    adds_to_cart("bagel", 2.50)
+    checks_out()
+    return Shop.total
+```
+
+A default wrapped in `initializer(...)` is called with the context on first read, giving
+each context its own value; any other default is a constant. Decorated scripts keep
+their signatures for type checkers.
 
 ### Context Scope Variables
 
