@@ -97,10 +97,11 @@ assert fills_cart() == ("Ada", "EUR", ["apple"])
 
 ## Constants and `initializer`
 
-A plain default is a constant shared by every context, so an unhashable default such
-as `[]` is rejected, as in dataclasses. Wrap a default in `initializer(fn)` to
-compute it per context: `fn(ctx)` runs on the first read and the result is
-stored.
+A plain default is a constant shared by every context, so a default whose type
+isn't hashable, such as `[]`, `{}` or `set()`, is rejected, as in dataclasses. A
+mutable object inside a tuple isn't detected and would be shared too. Wrap a
+default in `initializer(fn)` to compute it per context: `fn(ctx)` runs on the
+first read and the result is stored.
 
 ```{code-cell} python
 try:

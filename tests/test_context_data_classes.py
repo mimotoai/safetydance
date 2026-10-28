@@ -1,6 +1,7 @@
 import abc
 import enum
 import logging
+from unittest import mock
 
 import pytest
 
@@ -10,6 +11,7 @@ from safetydance import (
     NoActiveContext,
     context_data,
     script,
+    test_context,
 )
 from safetydance._safetydance import ContextPropertyDescriptor
 
@@ -211,3 +213,53 @@ def test_enum_cannot_be_decorated():
 
     with pytest.raises(TypeError, match="Color: an Enum can't be a context_data"):
         context_data(Color)
+
+
+@context_data
+class Cfg:
+    level: int = 1
+
+
+@script
+def test_mock_patch_object_sets_the_field_in_the_context_and_restores_it():
+    with mock.patch.object(Cfg, "level", 5):
+        assert Cfg.level == 5
+    assert Cfg.level == 1
+    assert isinstance(Cfg.__dict__["level"], ContextPropertyDescriptor)
+
+
+def test_monkeypatch_restores_the_field_after_the_context_has_gone(pytester):
+    pytester.makepyfile(
+        """
+        from safetydance import context_data, test_context
+
+        @context_data
+        class Cfg:
+            level: int = 1
+
+        @test_context
+        def test_patched(monkeypatch):
+            monkeypatch.setattr(Cfg, "level", 5)
+            assert Cfg.level == 5
+
+        @test_context
+        def test_restored():
+            assert Cfg.level == 1
+        """
+    )
+    pytester.runpytest("-p", "no:randomly").assert_outcomes(passed=2)
+
+
+@context_data
+class Named:
+    n: int
+
+
+def test_del_keeps_a_value_supplied_by_name():
+    @test_context
+    def run(n):
+        Named.n = 2
+        del Named.n
+        return Named.n
+
+    assert run(n=1) == 1

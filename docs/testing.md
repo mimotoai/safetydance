@@ -23,9 +23,13 @@ class Storage:
 
 @test_context
 def test_writes_report(tmp_path):
-    Storage.tmp_path  # the pytest fixture
-    ...
+    assert Storage.tmp_path == tmp_path  # the pytest fixture
 ```
+
+To give a field a different value for one test, assign it inside the test:
+the test's context is discarded afterwards. `monkeypatch.setattr(Cls, "field",
+value)` and `mock.patch.object` also work inside a `@test_context` test; they set
+the value in the test's context, and restoring clears it.
 
 The same mechanism, shown without pytest:
 

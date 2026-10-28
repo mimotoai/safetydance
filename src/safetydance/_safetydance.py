@@ -138,9 +138,12 @@ class ContextProperty(Generic[T]):
         elif self.name and self.name in context:
             value = context[self.name]
         elif self.initializer is not None:
-            value = self.initializer(context)
-            context[self] = value
-            context._trace(self, "initialized", frame)
+            # setdefault is atomic, so threads sharing a Context that initialize at
+            # the same time all get the value stored first.
+            initialized = self.initializer(context)
+            value = context._data.setdefault(self, initialized)
+            if value is initialized:
+                context._trace(self, "initialized", frame)
         else:
             context._trace(self, "not found", frame)
             raise ContextDataNotSet(f"ContextData {self} not found in Context")
@@ -186,7 +189,7 @@ class Context(MutableMapping[ContextProperty | str, Any]):
     parent's values. Use it as a context manager to make it the active context::
 
         with Context() as ctx:
-            Cart.items.value = ["apple"]
+            Cart.items = ["apple"]
 
     Entering a Context that is already active in the current thread or task raises
     ``RuntimeError``; one Context may be active in several threads or tasks at once.
@@ -505,7 +508,7 @@ def test_context(
 
         @test_context
         def test_cart(tmp_path):
-            assert Storage.tmp_path.value == tmp_path
+            assert Storage.tmp_path == tmp_path
 
     The tracing options and the rules for generator, async and callable-object
     functions are the same as for ``script``. ``test_context`` itself is not
@@ -619,9 +622,11 @@ class ContextData(type):
 
     A default wrapped in ``initializer(fn)`` is called with the Context on first
     read; any other default is a constant. A field with no default raises
-    ``ContextDataNotSet`` until it is set. Unhashable defaults such as ``[]``
-    raise ``ValueError``. ``ClassVar`` annotations are ordinary class attributes; an
-    ``initializer()`` default on one raises ``TypeError``.
+    ``ContextDataNotSet`` until it is set. A constant is shared by every context,
+    so a default whose type isn't hashable (a ``list``, ``dict`` or ``set``) raises
+    ``ValueError``; use ``initializer()`` for any mutable default, including one
+    nested in a tuple, which is not detected. ``ClassVar`` annotations are ordinary
+    class attributes; an ``initializer()`` default on one raises ``TypeError``.
 
     Classes built with ContextData are final: subclassing one raises ``TypeError``.
     Declare related fields on another class instead. A ContextData class may itself
@@ -673,11 +678,19 @@ class ContextData(type):
 
     # Fields are set (or unset) in the context rather than replaced on the class. The
     # property is called directly so the trace frame is the user's statement.
+    # Setting a field to its own descriptor is how mock.patch.object and
+    # monkeypatch.setattr restore it: that clears the patched value in the active
+    # context, if there is one, and leaves the class alone.
     def __setattr__(self, name, value):
         field = _field_descriptor(self, name)
-        if field is not None:
-            return field.context_data._set(get_context(), value, sys._getframe(1))
-        return super().__setattr__(name, value)
+        if field is None:
+            return super().__setattr__(name, value)
+        if value is field:
+            stack = _ACTIVE_CONTEXTS.get()
+            if stack:
+                field.context_data._unset(stack[-1], sys._getframe(1))
+            return None
+        return field.context_data._set(get_context(), value, sys._getframe(1))
 
     def __delattr__(self, name):
         field = _field_descriptor(self, name)
@@ -751,9 +764,10 @@ def context_data(cls: type[T]) -> type[T]:
     attributes behave.
 
     A default wrapped in ``initializer()`` is called with the Context on first read;
-    any other default is a constant. Unhashable defaults raise ``ValueError``, as
-    with dataclasses. The decorated class is final: subclassing it raises
-    ``TypeError``.
+    any other default is a constant. A default whose type isn't hashable (a ``list``,
+    ``dict`` or ``set``) raises ``ValueError``, as with dataclasses; a mutable object
+    nested in a tuple is not detected. The decorated class is final: subclassing it
+    raises ``TypeError``.
 
     The decorator rebuilds the class, so a base class's ``__init_subclass__`` runs
     again and class keywords are not carried over; use ``metaclass=ContextData`` for

@@ -467,3 +467,30 @@ def test_async_generator_callable_object_is_rejected():
 
     with pytest.raises(TypeError):
         script(Job())
+
+
+def test_concurrent_first_reads_share_one_initialized_value():
+    # Both threads are inside the initializer at once, so both produce a value; the
+    # first one stored must be the one each thread gets.
+    both_initializing = threading.Barrier(2, timeout=5)
+
+    def make_list(ctx):
+        both_initializing.wait()
+        return []
+
+    items = ContextProperty[list](initializer=make_list)
+    ctx = Context()
+
+    def worker(name):
+        with ctx:
+            items.value.append(name)
+
+    threads = [
+        threading.Thread(target=copy_context().run, args=(worker, name))
+        for name in ("a", "b")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(items(ctx)) == ["a", "b"]
