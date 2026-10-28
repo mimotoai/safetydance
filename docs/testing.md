@@ -258,4 +258,5 @@ default) share the registry of the process they run in. A `@step` in a
 `conftest.py` passes on the first run, and the second run fails with "ImportError
 while loading conftest" wrapping the conflict `ValueError`. Use
 `pytester.runpytest_subprocess()`, or call `unregister_steps(...)` on those steps
-in a fixture teardown.
+in a fixture teardown. The conftest module is gone after the run, so take the
+handle from the registry: `unregister_steps(Given.<name>)`.
