@@ -55,6 +55,7 @@ class ContextProperty(Generic[T]):
     description: str | None
     initializer: Callable[["Context"], T] | None
     declaring_cls: type | None
+    _key: "ContextProperty"
 
     def __init__(
         self,
@@ -67,6 +68,7 @@ class ContextProperty(Generic[T]):
         self.description = description
         self.initializer = initializer
         self.declaring_cls = declaring_cls
+        self._key = self
 
     @property
     def value(self) -> T:
@@ -82,18 +84,19 @@ class ContextProperty(Generic[T]):
     def __setitem__(self, context: "Context", new_value: T):
         self._set(context, new_value, sys._getframe(1))
 
-    # Values are stored under the property itself, so same-named properties never
-    # collide. The name is only a read fallback, which lets values supplied by name
-    # (e.g. test fixtures via test_context) bind to the property.
+    # Values are stored under _key (the property itself, or the base class's property
+    # for a redeclared field), so same-named properties never collide. The name is only
+    # a read fallback, which lets values supplied by name (e.g. test fixtures via
+    # test_context) bind to the property.
     def _get(self, context: "Context", frame: FrameType) -> T:
         found = True
-        if self in context:
-            value = context[self]
+        if self._key in context:
+            value = context[self._key]
         elif self.name and self.name in context:
             value = context[self.name]
         elif self.initializer is not None:
             value = self.initializer(context)
-            context[self] = value
+            context[self._key] = value
             context._trace(self, "initialized", frame)
         else:
             found = False
@@ -104,7 +107,11 @@ class ContextProperty(Generic[T]):
 
     def _set(self, context: "Context", new_value: T, frame: FrameType):
         context._trace(self, "set", frame)
-        context[self] = new_value
+        context[self._key] = new_value
+
+    def _unset(self, context: "Context", frame: FrameType):
+        context._trace(self, "deleted", frame)
+        context.pop(self._key, None)
 
     def __repr__(self) -> str:
         if self.name and self.declaring_cls:
@@ -117,7 +124,7 @@ class ContextProperty(Generic[T]):
         context = get_context()
         return bool(
             (self.name and self.name in context)
-            or self in context
+            or self._key in context
             or self.initializer is not None
         )
 
@@ -439,31 +446,51 @@ class ContextData(type):
         ret = super().__new__(cls, name, bases, namespace)
         for field_name, type_hint in _own_annotations(ret).items():
             initializer = None
-            if field_name in namespace:
-                initializer = _initializer_for(field_name, namespace[field_name])
+            default = namespace.get(field_name, _NO_DEFAULT)
+            if isinstance(default, ContextPropertyDescriptor):
+                # A namespace copied from a ContextData class: keep that field's default.
+                initializer = default.context_data.initializer
+            elif default is not _NO_DEFAULT:
+                initializer = _initializer_for(field_name, default)
+            inherited = _field_descriptor(ret.__mro__[1:], field_name)
             context_data = ContextProperty[type_hint](
                 field_name, initializer=initializer, declaring_cls=ret
             )
+            if inherited is not None:
+                # D2: a redeclared field shares the base's value; only the default changes.
+                context_data._key = inherited.context_data._key
             # Bypass ContextData.__setattr__, which would route to the descriptor.
             type.__setattr__(
                 ret, field_name, ContextPropertyDescriptor(field_name, context_data)
             )
         return ret
 
+    # Names resolve the way attribute lookup does, so fields inherited from a base class
+    # are set (or unset) in the context rather than shadowed on the subclass. The
+    # property is called directly so the trace frame is the user's statement.
     def __setattr__(self, name, value):
-        # Resolve the name the way attribute lookup does, so fields inherited from a
-        # base class are set in the context rather than shadowed on the subclass.
-        for klass in self.__mro__:
-            if name in klass.__dict__:
-                attr = klass.__dict__[name]
-                if isinstance(attr, ContextPropertyDescriptor):
-                    # Called directly so the trace frame is the user's assignment.
-                    return attr.context_data._set(
-                        get_context(), value, sys._getframe(1)
-                    )
-                break
-        # Fall back to normal attribute setting for attributes not managed by ContextData
+        field = _field_descriptor(self.__mro__, name)
+        if field is not None:
+            return field.context_data._set(get_context(), value, sys._getframe(1))
         return super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        field = _field_descriptor(self.__mro__, name)
+        if field is not None:
+            return field.context_data._unset(get_context(), sys._getframe(1))
+        return super().__delattr__(name)
+
+
+_NO_DEFAULT = object()
+
+
+def _field_descriptor(mro, name: str) -> ContextPropertyDescriptor | None:
+    """The descriptor attribute lookup would find for name, if it is a field."""
+    for klass in mro:
+        if name in klass.__dict__:
+            attr = klass.__dict__[name]
+            return attr if isinstance(attr, ContextPropertyDescriptor) else None
+    return None
 
 
 def _retarget_class_cells(old_cls: type, new_cls: type):
@@ -505,6 +532,11 @@ def context_data(cls: type[T]) -> type[T]:
             field2: int = 42
             field3: list = initializer(lambda ctx: [])
     """
+    if isinstance(cls, ContextData):
+        # Already built by the metaclass: a subclass of a ContextData class, or a
+        # class decorated twice.
+        return cls
+
     # Create a new namespace dictionary from the class's __dict__
     namespace = {}
     for key, value in cls.__dict__.items():
