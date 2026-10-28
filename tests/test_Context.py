@@ -4,7 +4,7 @@ import threading
 import pytest
 
 import safetydance
-from safetydance import Context, ContextProperty, context, get_context
+from safetydance import Context, ContextProperty, NoActiveContext, context, get_context
 
 
 nested_data = ContextProperty[str]()
@@ -145,17 +145,55 @@ def test_reentering_context_from_further_up_the_chain_raises():
         assert nested_data(inner) == "still usable"
 
 
-def test_exiting_a_context_that_is_not_innermost_raises():
+def test_exiting_a_context_that_is_not_innermost_raises_and_unwinds():
     outer, inner = Context(), Context()
     outer.__enter__()
     inner.__enter__()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="not the active context"):
         outer.__exit__(None, None, None)
-    assert get_context() is inner
-    inner.__exit__(None, None, None)
-    outer.__exit__(None, None, None)
+    with pytest.raises(NoActiveContext):
+        get_context()
     with pytest.raises(RuntimeError):
-        outer.__exit__(None, None, None)
+        inner.__exit__(None, None, None)
+    with outer:
+        assert get_context() is outer
+
+
+def test_leaked_inner_context_is_unwound_with_the_block_that_leaked_it():
+    with Context() as base:
+        leaked = Context()
+        with pytest.raises(RuntimeError, match="not the active context"):
+            with Context() as block:
+                leaked.__enter__()
+        assert get_context() is base
+        with block:
+            assert get_context() is block
+        with leaked:
+            assert get_context() is leaked
+
+
+def test_exiting_a_context_that_is_not_active_leaves_the_stack_alone():
+    with Context() as active:
+        with pytest.raises(RuntimeError, match="not the active context"):
+            Context().__exit__(None, None, None)
+        assert get_context() is active
+
+
+def test_exit_from_another_thread_leaves_both_stacks_alone():
+    errors = []
+    with Context() as ctx:
+
+        def exit_elsewhere():
+            try:
+                ctx.__exit__(None, None, None)
+            except RuntimeError as e:
+                errors.append(e)
+
+        thread = threading.Thread(target=exit_elsewhere)
+        thread.start()
+        thread.join()
+        assert get_context() is ctx
+    assert len(errors) == 1
 
 
 def test_reused_context_on_new_thread_has_no_stale_parent():

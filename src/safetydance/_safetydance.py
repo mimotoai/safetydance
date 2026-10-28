@@ -191,6 +191,8 @@ class Context(MutableMapping[ContextProperty | str, Any]):
 
     Entering a Context that is already active in the current thread or task raises
     ``RuntimeError``; one Context may be active in several threads or tasks at once.
+    Exiting a Context that is not the innermost one raises ``RuntimeError``; if it
+    is active, the contexts entered after it are exited with it.
     Contexts compare by identity and are hashable.
 
     :param tracing: log each read, write and delete of context data.
@@ -250,11 +252,17 @@ class Context(MutableMapping[ContextProperty | str, Any]):
         _ACTIVE_CONTEXTS.set(stack + (self,))
         return self
 
+    # Contexts left open above this one (an __enter__ without its __exit__) are dropped
+    # along with it before raising, so the thread or task is not stuck with them.
     def __exit__(self, exc_type, exc_value, traceback):
         stack = _ACTIVE_CONTEXTS.get()
-        if not stack or stack[-1] is not self:
-            raise RuntimeError(f"{self!r} is not the active context")
-        _ACTIVE_CONTEXTS.set(stack[:-1])
+        for index in range(len(stack) - 1, -1, -1):
+            if stack[index] is self:
+                _ACTIVE_CONTEXTS.set(stack[:index])
+                if index == len(stack) - 1:
+                    return
+                break
+        raise RuntimeError(f"{self!r} is not the active context")
 
     def _trace(self, context_data: ContextProperty, op: str, frame: FrameType):
         # Logged once: by this context if it traces, else by the innermost active
