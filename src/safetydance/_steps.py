@@ -3,7 +3,7 @@ import sys
 import threading
 from importlib.metadata import entry_points
 from inspect import currentframe, ismethod
-from types import CodeType, FunctionType
+from types import CodeType
 from typing import Any, Callable, Iterable, TypeVar
 
 __all__ = [
@@ -106,7 +106,7 @@ def _layers(f: Callable[..., Any]) -> list[Any]:
     return layers
 
 
-def _function_key(f: Any, active: frozenset[int]) -> _Key:
+def _function_key(f: Any, wrapped: Any) -> _Key:
     code: CodeType = f.__code__
     # A pseudo-file such as "<string>" does not identify the source, so the module
     # tells apart code exec'd in different modules.
@@ -118,8 +118,12 @@ def _function_key(f: Any, active: frozenset[int]) -> _Key:
             contents = cell.cell_contents
         except ValueError:
             cells.append(("<empty>",))
+            continue
+        if wrapped is not None and contents is wrapped:
+            # A wrapper captures the function it wraps, which the next layer keys.
+            cells.append(("<wrapped>",))
         else:
-            cells.append(_value_key(contents, active))
+            cells.append(_value_key(contents))
     return (
         code.co_filename,
         code.co_firstlineno,
@@ -127,82 +131,56 @@ def _function_key(f: Any, active: frozenset[int]) -> _Key:
         # Code compares by value, so different code at one location stays distinct.
         code,
         module,
-        tuple(_value_key(v, active) for v in getattr(f, "__defaults__", None) or ()),
-        tuple((name, _value_key(v, active)) for name, v in sorted(kwdefaults.items())),
+        tuple(_value_key(v) for v in getattr(f, "__defaults__", None) or ()),
+        tuple((name, _value_key(v)) for name, v in sorted(kwdefaults.items())),
         tuple(cells),
     )
 
 
-def _module_file(module: object) -> str | None:
-    """The real file of the imported module named ``module``, if there is one."""
-    file = getattr(sys.modules.get(module), "__file__", None) if isinstance(module, str) else None
-    return file if isinstance(file, str) and not file.startswith("<") else None
+# Exactly these types (not subclasses) compare equal across two imports of one
+# module without running user code; tuples and frozensets of them do too.
+_PLAIN_TYPES = (int, bool, float, complex, str, bytes, type(None))
 
 
-def _is_module_level(qualname: str) -> bool:
-    # A lambda or a function made inside another has no name of its own to go by.
-    return "<locals>" not in qualname and qualname.rpartition(".")[2] != "<lambda>"
-
-
-def _function_value_key(f: FunctionType, active: frozenset[int]) -> Any:
-    if _is_module_level(f.__qualname__):
-        file = _module_file(f.__module__) or f.__code__.co_filename
-        module = f.__module__ if file.startswith("<") else None
-        return ("<def>", file, f.__qualname__, module)
-    if id(f) in active:
-        # A function that captures itself, as a recursive closure does.
-        return ("<cycle>",)
-    return _function_key(f, active | {id(f)})
-
-
-def _class_key(cls: type) -> Any:
-    # Never by the class's attributes: generated methods have no useful file, and
-    # reading attributes can evaluate lazy objects.
-    if "<locals>" not in cls.__qualname__:
-        file = _module_file(cls.__module__)
-        if file is not None:
-            return ("<class>", file, cls.__qualname__)
-    return ("<id>", id(cls))
-
-
-def _value_key(value: Any, active: frozenset[int]) -> Any:
-    """
-    Key a default or captured ``value`` of a step.
-
-    By value where that is safe, so a module imported twice gives equal keys;
-    otherwise by identity. Telling two steps apart wrongly is loud (AmbiguousStep),
-    while merging them wrongly would silently pick one.
-    """
-    if ismethod(value):
-        return ("<method>", id(value.__self__), _value_key(value.__func__, active))
-    if isinstance(value, FunctionType):
-        return _function_value_key(value, active)
-    if isinstance(value, type):
-        return _class_key(value)
+def _plain_key(value: Any) -> Any:
+    """The key of a builtin ``value`` that is safe to compare by value, else None."""
+    # type() reads no attribute, so a lazy proxy is not evaluated, and identity
+    # checks run no __eq__ or __hash__, not even a metaclass's.
     cls = type(value)
-    kind = cls if cls.__module__ == "builtins" else _class_key(cls)
-    if isinstance(value, (tuple, frozenset)):
-        # Element by element, so that (1,) and (1.0,) stay apart.
-        items = (_value_key(item, active) for item in value)
-        return (kind, tuple(items) if isinstance(value, tuple) else frozenset(items))
-    if isinstance(value, float):
+    if cls is float:
         # hex() tells apart 0.0 and -0.0, and makes NaN equal to itself.
-        return (kind, value.hex())
-    if isinstance(value, complex):
-        return (kind, value.real.hex(), value.imag.hex())
-    try:
-        hash(value)
-    except Exception:
-        return ("<id>", id(value))
-    return (kind, value)
+        return (cls, value.hex())
+    if cls is complex:
+        return (cls, value.real.hex(), value.imag.hex())
+    if any(cls is plain for plain in _PLAIN_TYPES):
+        return (cls, value)
+    if cls is tuple or cls is frozenset:
+        # Element by element, so that (1,) and (1.0,) stay apart.
+        items = [_plain_key(item) for item in value]
+        if any(item is None for item in items):
+            return None
+        return (cls, tuple(items) if cls is tuple else frozenset(items))
+    return None
 
 
-def _layer_key(layer: Any) -> _Key:
+def _value_key(value: Any) -> Any:
+    """
+    Key a default or captured ``value`` of a step: builtins by value, all else by id.
+
+    So a module imported twice dedupes only steps whose values are builtins. Any
+    other value tells the copies apart, loudly (AmbiguousStep), rather than risk
+    silently merging two different steps.
+    """
+    key = _plain_key(value)
+    return ("<id>", id(value)) if key is None else key
+
+
+def _layer_key(layer: Any, wrapped: Any) -> _Key:
     if ismethod(layer):
         # A bound method forwards __code__, so methods of different instances share it.
-        return ("<method>", id(layer.__self__), _layer_key(layer.__func__))
+        return ("<method>", id(layer.__self__), _layer_key(layer.__func__, wrapped))
     if isinstance(getattr(layer, "__code__", None), CodeType):
-        return _function_key(layer, frozenset({id(layer)}))
+        return _function_key(layer, wrapped)
     return ("<object>", id(layer))
 
 
@@ -210,7 +188,11 @@ def _step_key(f: Callable[..., Any]) -> _Key:
     # Keyed by code, defaults and captured values rather than object identity, so
     # one module imported under two names (e.g. through pytest's rootdir) is one
     # step. Every wrapper in a functools.wraps chain counts.
-    return tuple(_layer_key(layer) for layer in _layers(f))
+    layers = _layers(f)
+    return tuple(
+        _layer_key(layer, layers[i + 1] if i + 1 < len(layers) else None)
+        for i, layer in enumerate(layers)
+    )
 
 
 def _full_path(f: Callable[..., Any]) -> _Path:

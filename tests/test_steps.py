@@ -1,4 +1,7 @@
+import collections
 import copy
+import decimal
+import enum
 import functools
 import importlib
 import inspect
@@ -645,9 +648,14 @@ def test_recursive_closure_is_registered():
 
         return countdown
 
-    step(factory())
-    step(factory())
+    # It captures itself, a function, so it is keyed by identity: no recursion.
+    countdown = factory()
+    step(countdown)
+    step(countdown)
     assert Given.countdown(3) == 0
+    step(factory())
+    with pytest.raises(AmbiguousStep):
+        Given.countdown
 
 
 class Fetcher:
@@ -874,57 +882,73 @@ def double_import(tmp_path, monkeypatch):
         sys.modules.pop(name, None)
 
 
+PLAIN_STEPS_SOURCE = """\
+import functools
+from safetydance._steps import step, step_namespace
+
+
+def deco(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+@step
+def get(url="/", timeout=3.5, row=("x", 1, 2.0, frozenset({1}), None, b"z", 1j, True)):
+    return url
+
+
+@step_namespace("http")
+@deco
+def post(url="/", *, retries=3):
+    return url
+
+
+def make(code):
+    def then_status(response):
+        return response == code
+
+    return then_status
+
+
+then_status = step(make(200))
+"""
+
+
+def test_double_import_dedupes_steps_with_only_builtin_values(double_import):
+    first, second = double_import(PLAIN_STEPS_SOURCE)
+    # A plain step, builtin defaults, a functools.wraps wrapper (whose captured
+    # function is the next layer) and a closure over an int.
+    assert Given.get is second.get
+    assert Given.http.post is second.post
+    assert Given.post is second.post
+    assert Given.then_status is second.then_status
+    unregister_steps(first.get)
+    with pytest.raises(StepNotFound):
+        Given.get
+
+
 @pytest.mark.parametrize(
     "definition",
     [
         "class Kind:\n    pass\n",
-        # Generated methods (namedtuple, dataclass) have a "<string>" file of their
-        # own; the class is keyed by its module's file, not theirs.
         "from collections import namedtuple\nKind = namedtuple('Kind', 'x y')\n",
         "from dataclasses import dataclass\n@dataclass\nclass Kind:\n    x: int = 1\n",
-        "from typing import NamedTuple\nclass Kind(NamedTuple):\n    x: int\n",
         "import enum\nclass Kind(enum.Enum):\n    A = 1\n",
+        "def Kind():\n    pass\n",
     ],
+    ids=["class", "namedtuple", "dataclass", "enum", "function"],
 )
-def test_double_import_dedupes_a_class_default(double_import, definition):
-    first, second = double_import(
-        definition + "def get(kind=Kind):\n    return kind\n"
-    )
-    assert first.Kind is not second.Kind
-    step_namespace("http")(first.get)
-    step_namespace("http")(second.get)
-    assert Given.get is second.get
-    assert Given.http.get is second.get
-
-
-def test_double_import_dedupes_module_level_function_values(double_import):
-    first, second = double_import(
-        "_MISSING = object()\n"
-        "def helper(x=_MISSING):\n"
-        "    return x\n"
-        "def get(h=helper):\n"
-        "    return h\n"
-        "def make():\n"
-        "    h = helper\n"
-        "    def fetch():\n"
-        "        return h\n"
-        "    return fetch\n"
-        "fetch = make()\n"
-    )
-    for module in [first, second]:
-        step(module.get)
-        step(module.fetch)
-    # Keyed by name, so the helper's own sentinel default does not matter.
-    assert Given.get is second.get
-    assert Given.fetch is second.fetch
-
-
-def test_module_level_function_value_falls_back_to_its_code_file():
-    # Not in sys.modules, so no module file: co_filename is the same for both.
-    first, second = import_twice("def helper():\n    pass\ndef get(h=helper):\n    return h\n")
-    step(first["get"])
-    step(second["get"])
-    assert Given.get is second["get"]
+def test_double_import_with_a_class_or_function_default_is_ambiguous(double_import, definition):
+    # Each import has its own class or function, so the copies are told apart.
+    first, second = double_import(definition + "def get(kind=Kind):\n    return kind\n")
+    step(first.get)
+    step(second.get)
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    assert Given.sd_dbl.steps.get is first.get
 
 
 @pytest.mark.parametrize(
@@ -966,8 +990,8 @@ def test_captured_lambdas_are_distinct_steps():
 
 
 def test_captured_module_level_lambdas_are_distinct_steps():
-    # Module-level lambdas share the qualname "<lambda>", so a name cannot tell
-    # them apart; they are keyed by their code instead.
+    # Module-level lambdas share the qualname "<lambda>"; as function values they
+    # are keyed by identity.
     namespace = {"__name__": "pkg_a.steps"}
     source = (
         "from safetydance._steps import step_namespace\n"
@@ -987,8 +1011,7 @@ def test_captured_module_level_lambdas_are_distinct_steps():
 
 
 def test_classes_from_modules_with_a_pseudo_file_are_distinct(monkeypatch):
-    # "<generated>" names no file, so same-named classes from two such modules
-    # are keyed by identity, not merged.
+    # Classes are keyed by identity, so same-named classes are never merged.
     def make(cls):
         def build():
             return cls
@@ -1210,3 +1233,141 @@ def test_endless_wrapped_chain_raises_value_error():
         step(Endless())
     with pytest.raises(ValueError, match="wrapper loop"):
         unregister_steps(Endless())
+
+
+# Round 5: only builtin values are keyed by value.
+
+
+def retry(times):
+    def decorate(f):
+        @functools.wraps(f)
+        def wrapper(*args, **kwargs):
+            return times, f(*args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
+def make_then_get(fn):
+    def then_get():
+        return fn()
+
+    return then_get
+
+
+def test_captured_wraps_wrappers_are_distinct_steps():
+    # functools.wraps copies the qualname and module, so a name cannot tell the
+    # two wrappers apart.
+    three = step_namespace("three")(make_then_get(retry(3)(fetch)))
+    step_namespace("five")(make_then_get(retry(5)(fetch)))
+    with pytest.raises(AmbiguousStep):
+        Given.then_get
+    unregister_steps(three)
+    assert Given.five.then_get() == (5, "fetched")
+    assert Given.then_get() == (5, "fetched")
+
+
+def test_wrapper_layers_capturing_different_values_are_distinct_steps():
+    step_namespace("three")(retry(3)(fetch))
+    step_namespace("five")(retry(5)(fetch))
+    with pytest.raises(AmbiguousStep):
+        Given.fetch
+    assert Given.three.fetch() == (3, "fetched")
+
+
+def make_build(cls):
+    def build():
+        return cls
+
+    return build
+
+
+@pytest.mark.parametrize(
+    "make_class",
+    [
+        lambda n: collections.namedtuple("Row", "x y" if n == 1 else "p q r"),
+        lambda n: type("Kind", (), {"n": n}),
+        lambda n: enum.Enum("Color", "RED GREEN" if n == 1 else "BLUE"),
+    ],
+    ids=["namedtuple", "type", "functional enum"],
+)
+def test_classes_made_at_run_time_are_distinct_steps(make_class):
+    first, second = make_class(1), make_class(2)
+    assert first.__qualname__ == second.__qualname__
+    step_namespace("a")(make_build(first))
+    step_namespace("b")(make_build(second))
+    with pytest.raises(AmbiguousStep):
+        Given.build
+    assert Given.a.build() is first
+
+
+def test_equal_decimals_are_distinct_steps():
+    step_namespace("a")(make_returning(decimal.Decimal("1.0")))
+    step_namespace("b")(make_returning(decimal.Decimal("1.00")))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    assert str(Given.b.get()) == "1.00"
+
+
+def test_subclasses_of_builtins_are_keyed_by_identity():
+    class Label(str):
+        pass
+
+    step_namespace("a")(make_returning(Label("x")))
+    step_namespace("b")(make_returning(Label("x")))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+
+
+class Unready:
+    """A lazy proxy that is not set up: reading its class, hashing or comparing fails."""
+
+    @property
+    def __class__(self):
+        raise RuntimeError("not configured")
+
+    def __hash__(self):
+        raise RuntimeError("not configured")
+
+    def __eq__(self, other):
+        raise RuntimeError("not configured")
+
+
+def test_lazy_proxy_default_is_not_evaluated():
+    settings = Unready()
+
+    def get(config=settings):
+        return config
+
+    step(get)
+    step(get)
+    register_steps(get, namespace="x")
+    assert Given.get is get
+    assert Given.x.get is get
+    unregister_steps(get)
+    with pytest.raises(StepNotFound):
+        Given.get
+
+
+def test_key_does_not_depend_on_sys_modules(double_import):
+    first, _ = double_import("class Kind:\n    pass\ndef get(kind=Kind):\n    return kind\n")
+    step(first.get)
+    # Not monkeypatch.delitem: its undo would put the module back after the
+    # fixture's cleanup, leaving it stale for the next test.
+    sys.modules.pop("sd_dbl.steps")
+    unregister_steps(first.get)
+    with pytest.raises(StepNotFound):
+        Given.get
+
+
+def test_tuples_holding_other_objects_are_keyed_by_identity():
+    # Not every element is a builtin, so the whole tuple is keyed by identity.
+    step_namespace("a")(make_returning((1, object())))
+    step_namespace("b")(make_returning((1, object())))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    shared = (1, object())
+    step_namespace("c")(make_returning(shared))
+    step_namespace("d")(make_returning(shared))
+    assert Given.c.get() is Given.d.get()
