@@ -30,7 +30,19 @@ class ContextProperty(Generic[T]):
 
     @property
     def value(self) -> T:
-        context = get_context()
+        return self._get(get_context(), currentframe().f_back)
+
+    @value.setter
+    def value(self, new_value: T):
+        self._set(get_context(), new_value, currentframe().f_back)
+
+    def __call__(self, context: "Context") -> T:
+        return self._get(context, currentframe().f_back)
+
+    def __setitem__(self, context: "Context", new_value: T):
+        self._set(context, new_value, currentframe().f_back)
+
+    def _get(self, context: "Context", frame: FrameType) -> T:
         value = context.get(self, None)
         found = False
         if value is None and self.name:
@@ -42,17 +54,15 @@ class ContextProperty(Generic[T]):
         if not found and self.initializer is not None:
             value = self.initializer(context)
             context[self.name or self] = value
-            context._trace(self, "initialized", currentframe().f_back)
+            context._trace(self, "initialized", frame)
             found = True
-        context._trace(self, "retrieved", currentframe().f_back)
+        context._trace(self, "retrieved", frame)
         if not found:
             raise KeyError(f"ContextData {self} not found in Context")
         return value
 
-    @value.setter
-    def value(self, new_value: T):
-        context = get_context()
-        context._trace(self, "set", currentframe().f_back)
+    def _set(self, context: "Context", new_value: T, frame: FrameType):
+        context._trace(self, "set", frame)
         context[self.name or self] = new_value
 
     def __repr__(self) -> str:

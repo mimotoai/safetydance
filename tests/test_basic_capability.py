@@ -1,6 +1,6 @@
 import logging
 import pytest
-from safetydance import ContextProperty, context
+from safetydance import Context, ContextProperty, context
 
 
 basic_data = ContextProperty[str]()
@@ -106,3 +106,50 @@ def test_context_tracing(caplog):  # Use pytest's caplog fixture
         for record in caplog.records
         if record.levelname == "INFO"
     )
+
+
+def test_call_gets_value_from_given_context():
+    ctx = Context()
+    ctx[basic_data] = "explicit"
+    assert basic_data(ctx) == "explicit"
+
+
+def test_call_not_found_raises_key_error():
+    with pytest.raises(KeyError):
+        basic_data(Context())
+
+
+def test_call_runs_initializer_in_given_context():
+    ctx = Context()
+    assert data_with_initializer(ctx) == "initialized_value"
+    assert ctx[data_with_initializer] == "initialized_value"
+
+
+def test_setitem_sets_value_in_given_context():
+    ctx = Context()
+    basic_data[ctx] = "assigned"
+    assert basic_data(ctx) == "assigned"
+    with ctx:
+        assert basic_data.value == "assigned"
+
+
+@context
+def test_call_and_setitem_ignore_active_context():
+    other = Context()
+    basic_data[other] = "other"
+    assert not basic_data.is_set
+
+    basic_data.value = "active"
+    assert basic_data(other) == "other"
+
+
+def test_call_and_setitem_trace_given_context(caplog):
+    caplog.set_level(logging.INFO)
+    ctx = Context(tracing=True, tracing_logger=logging.getLogger("safetydance"))
+
+    basic_data[ctx] = "traced"
+    basic_data(ctx)
+
+    messages = [record.message for record in caplog.records]
+    assert any("set by" in message and __file__ in message for message in messages)
+    assert any("retrieved by" in message and __file__ in message for message in messages)
