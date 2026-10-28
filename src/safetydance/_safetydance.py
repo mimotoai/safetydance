@@ -8,6 +8,7 @@ from inspect import (
     iscoroutinefunction,
     isgeneratorfunction,
     isroutine,
+    unwrap,
 )
 from logging import Logger
 from types import FrameType
@@ -688,10 +689,16 @@ def _retarget_class_cells(old_cls: type, new_cls: type):
         else:
             funcs = [attr]
         for func in funcs:
+            if not callable(func):
+                continue
             # Decorators built with functools.wraps hide the original behind __wrapped__.
-            while hasattr(func, "__wrapped__"):
-                func = func.__wrapped__
-            code = getattr(func, "__code__", None)
+            # unwrap stops on cycles and endless chains; an object whose attribute lookup
+            # fails is not a method of the class body, so it is left alone.
+            try:
+                func = unwrap(func)
+                code = getattr(func, "__code__", None)
+            except Exception:
+                continue
             if code is None or "__class__" not in code.co_freevars:
                 continue
             cell = (func.__closure__ or ())[code.co_freevars.index("__class__")]

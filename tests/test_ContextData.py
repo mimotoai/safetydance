@@ -1,5 +1,6 @@
 import logging
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -579,3 +580,58 @@ def test_super_in_property_of_context_data_class():
             return "child+" + super().label
 
     assert Child().label == "child+base"
+
+
+class _CyclicWrapped:
+    def __call__(self):
+        pass
+
+    @property
+    def __wrapped__(self):
+        return self
+
+
+class _EndlessProxy:
+    def __call__(self):
+        pass
+
+    def __getattr__(self, name):
+        return _EndlessProxy()
+
+
+class _NonCallableProxy:
+    def __getattr__(self, name):
+        return _NonCallableProxy()
+
+
+class _BrokenWrapped:
+    def __call__(self):
+        pass
+
+    @property
+    def __wrapped__(self):
+        raise RuntimeError("no lookups here")
+
+
+@pytest.mark.parametrize(
+    "attr", [_CyclicWrapped, _EndlessProxy, _NonCallableProxy, _BrokenWrapped]
+)
+def test_class_attributes_with_odd_wrapped_do_not_stop_decoration(attr):
+    built = []
+
+    def decorate():
+        @context_data
+        class Holder:
+            odd = attr()
+            value: int = 1
+
+        built.append(Holder)
+
+    # A daemon thread, so a regression to an endless __wrapped__ walk fails
+    # the test instead of hanging the run.
+    worker = threading.Thread(target=decorate, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    assert not worker.is_alive(), "context_data hung on the class attribute"
+    assert len(built) == 1
+    assert isinstance(built[0].__dict__["odd"], attr)
