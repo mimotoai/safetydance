@@ -1,5 +1,6 @@
 import keyword
 import threading
+from importlib.metadata import entry_points
 from inspect import unwrap
 from typing import Any, Callable, Iterable, TypeVar
 
@@ -30,7 +31,8 @@ class AmbiguousStep(StepNotFound):
 
 
 def _installed_entry_points() -> Iterable[Any]:
-    return ()
+    """The installed entry points whose modules register steps when loaded."""
+    return entry_points(group=ENTRY_POINT_GROUP)
 
 
 def _is_segment(name: str) -> bool:
@@ -99,6 +101,12 @@ class _Registry:
         # Not called here: entry points are read lazily, on lookup.
         self._entry_points = entry_points
         self._lock = threading.Lock()
+        # Held while entry points load, never together with _lock: a loading module
+        # registers steps, which takes _lock. Reentrant, so a module may look steps
+        # up while it is being imported.
+        self._load_lock = threading.RLock()
+        self._unloaded: list[Any] | None = None
+        self._loading: set[int] = set()
         self._explicit: dict[_Path, tuple[_Key, Callable[..., Any]]] = {}
         self._default: dict[_Path, dict[_Key, Callable[..., Any]]] = {}
         # Every proper prefix of a registered path, mapped to its child names; the
@@ -144,7 +152,41 @@ class _Registry:
                 self._explicit[path] = items[-1]
                 self._add_prefixes(path)
 
+    def _load_entry_points(self, name: str | None) -> None:
+        """Load every not-yet-loaded entry point called ``name``, or all of them."""
+        # The list only shrinks, and only after a load returns, so empty means done.
+        if self._unloaded == []:
+            return
+        with self._load_lock:
+            if self._unloaded is None:
+                self._unloaded = list(self._entry_points())
+            for ep in list(self._unloaded):
+                # Skip one this thread is already loading, as a circular import would.
+                if (name is not None and ep.name != name) or id(ep) in self._loading:
+                    continue
+                # A lookup made while an earlier one was loading may have loaded it.
+                if not any(ep is pending for pending in self._unloaded):
+                    continue
+                self._loading.add(id(ep))
+                try:
+                    ep.load()
+                finally:
+                    self._loading.discard(id(ep))
+                # Only once load() returns, so a failed load raises again next time.
+                self._unloaded = [pending for pending in self._unloaded if pending is not ep]
+
     def resolve(self, path: _Path) -> Any:
+        if len(path) > 1:
+            return self._resolve(path)
+        self._load_entry_points(path[0])
+        try:
+            return self._resolve(path)
+        except StepNotFound:
+            pass
+        self._load_entry_points(None)
+        return self._resolve(path)
+
+    def _resolve(self, path: _Path) -> Any:
         with self._lock:
             explicit = self._explicit.get(path)
             defaults = list(self._default.get(path, {}).values())
