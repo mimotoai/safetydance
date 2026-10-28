@@ -1,0 +1,95 @@
+# Pipelines run for merge requests and for the default branch only (no
+# duplicate branch + MR pipelines). `test`, `typecheck` and `package` run in
+# both and `version-check` in merge requests; `publish` deploys, so it runs only
+# on the default branch.
+#
+# Releasing: a merge request that changes the package sets the version to
+# release (`uv version --bump minor`, `uv version 1.0.0`); merging it publishes
+# that version. See scripts/release.py.
+#
+# Stage ordering (rather than `needs:`) makes the deploy job wait for the whole
+# test stage: with stages, a deploy job starts only after every job of the
+# earlier stage has succeeded.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+default:
+  image: ghcr.io/astral-sh/uv:0.9.0-python3.12-bookworm
+
+stages:
+  - test
+  - deploy
+
+# Only the `test` group: `dev` also pulls in the docs toolchain.
+test:
+  stage: test
+  parallel:
+    matrix:
+      - PYTHON: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+  script:
+    - uv run --locked --no-default-groups --group test -p "$PYTHON" pytest -q
+
+typecheck:
+  stage: test
+  script:
+    - uv run --locked --no-default-groups --group typing -p 3.14 mypy src tests/typecheck
+
+# PyPI refuses an upload whose README doesn't render; check the built metadata
+# on every pipeline rather than at publish time.
+package:
+  stage: test
+  script:
+    - uv build -q -o build/dist-check
+    - uv run --no-project --with "twine==7.0.0" twine check --strict build/dist-check/*
+
+# A merge request that changes the package (src/safetydance/, or the published
+# parts of pyproject.toml) must raise the version above the target branch's and
+# every release on PyPI.
+version-check:
+  stage: test
+  variables:
+    TARGET: origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+  script:
+    - git fetch -q origin "$CI_MERGE_REQUEST_DIFF_BASE_SHA" "+refs/heads/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}:refs/remotes/${TARGET}"
+    - uv run --no-project --with packaging python scripts/release.py check-bump "$CI_MERGE_REQUEST_DIFF_BASE_SHA" "$TARGET"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Publishes the version in pyproject.toml if it isn't on PyPI yet; merges that
+# don't change the version publish nothing.
+#
+# Only the tip of the default branch publishes: a job for a superseded commit
+# (a late or retried pipeline) exits without publishing, so older code is never
+# released under a newer version. The tag and GitLab release (vX.Y.Z) are
+# created before the upload, so a failed upload can simply be retried. A partial
+# upload (e.g. only the sdist) needs a new version.
+publish:
+  stage: deploy
+  # Serialises publish jobs: concurrent pipelines would race on the upload.
+  resource_group: publish
+  variables:
+    UV_PUBLISH_TOKEN: $UV_PYPI_ACCESS_TOKEN
+  script:
+    - git fetch -q origin "$CI_DEFAULT_BRANCH"
+    - |
+      if [ "$(git rev-parse FETCH_HEAD)" != "$CI_COMMIT_SHA" ]; then
+        echo "$CI_COMMIT_SHA is no longer the tip of ${CI_DEFAULT_BRANCH}; skipping"
+        exit 0
+      fi
+    # Exit status 10: this version is already on PyPI.
+    - |
+      status=0
+      uv run --no-project --with packaging python scripts/release.py needs-release || status=$?
+      if [ "$status" -eq 10 ]; then exit 0; fi
+      if [ "$status" -ne 0 ]; then exit "$status"; fi
+    - ': "${UV_PYPI_ACCESS_TOKEN:?}"'
+    - uv run --no-project --with packaging python scripts/release.py create-release
+    - uv build
+    - uv publish
+  artifacts:
+    paths:
+      - dist
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

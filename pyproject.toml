@@ -19,11 +19,12 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/dcharbon/safetydance"
-Repository = "https://github.com/dcharbon/safetydance.git"
+Homepage = "https://gitlab.com/dcharbon/safetydance"
+Repository = "https://gitlab.com/dcharbon/safetydance.git"
+Changelog = "https://gitlab.com/dcharbon/safetydance/-/blob/main/CHANGELOG.rst"
 
 [dependency-groups]
-test = ["pytest>=8.3.5,<9", "pytest-cov>=6.1.0,<7"]
+test = ["pytest>=8.3.5,<9", "pytest-cov>=6.1.0,<7", "packaging>=24"]
 docs = ["jupyter-book>=1.0.4.post1,<2"]
 typing = ["mypy>=1.18"]
 dev = [

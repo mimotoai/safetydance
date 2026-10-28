@@ -2539,6 +2539,7 @@ dev = [
     { name = "jupyter-book" },
     { name = "mypy" },
     { name = "nox" },
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -2546,6 +2547,7 @@ docs = [
     { name = "jupyter-book" },
 ]
 test = [
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -2560,11 +2562,13 @@ dev = [
     { name = "jupyter-book", specifier = ">=1.0.4.post1,<2" },
     { name = "mypy", specifier = ">=1.18" },
     { name = "nox", specifier = ">=2025.2.9" },
+    { name = "packaging", specifier = ">=24" },
     { name = "pytest", specifier = ">=8.3.5,<9" },
     { name = "pytest-cov", specifier = ">=6.1.0,<7" },
 ]
 docs = [{ name = "jupyter-book", specifier = ">=1.0.4.post1,<2" }]
 test = [
+    { name = "packaging", specifier = ">=24" },
     { name = "pytest", specifier = ">=8.3.5,<9" },
     { name = "pytest-cov", specifier = ">=6.1.0,<7" },
 ]
