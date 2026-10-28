@@ -134,13 +134,11 @@ class Context(MutableMapping[ContextProperty | str, Any]):
         self.tracing = tracing
         self.tracing_logger = tracing_logger or logging.getLogger()
         self.tracing_log_level = tracing_log_level
-        self.parent: Context | None = None
         self._data = dict(*args, **kwargs)
 
     # Every Context owns its storage: a nested Context (and so a nested script) never
     # reads or writes its parent's values. To share a context, call a step (a plain
-    # function) rather than a script. `parent` is the Context that was active on
-    # entry; it is restored on exit and receives trace messages while nested.
+    # function) rather than a script.
     def __getitem__(self, key):
         return self._data[key]
 
@@ -166,37 +164,42 @@ class Context(MutableMapping[ContextProperty | str, Any]):
 
     __hash__ = object.__hash__
 
+    # The active stack lives in a ContextVar, never on the Context, so one Context can
+    # be active on several threads or tasks at once.
     def __enter__(self) -> "Context":
-        parent = _CURRENT_CONTEXT.get()
-        ancestor = parent
-        while ancestor is not None:
-            if ancestor is self:
-                raise RuntimeError(f"{self!r} is already active")
-            ancestor = ancestor.parent
-        self.parent = parent
-        _CURRENT_CONTEXT.set(self)
+        stack = _ACTIVE_CONTEXTS.get()
+        if any(active is self for active in stack):
+            raise RuntimeError(f"{self!r} is already active")
+        _ACTIVE_CONTEXTS.set(stack + (self,))
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        _CURRENT_CONTEXT.set(self.parent)
-        self.parent = None
+        stack = _ACTIVE_CONTEXTS.get()
+        if not stack or stack[-1] is not self:
+            raise RuntimeError(f"{self!r} is not the active context")
+        _ACTIVE_CONTEXTS.set(stack[:-1])
 
     def _trace(self, context_data: ContextProperty, op: str, frame: FrameType):
-        if self.tracing:
+        # Logged once: by this context if it traces, else by the innermost active
+        # context that does, so tracing a script also traces the scripts it calls.
+        tracer = self if self.tracing else None
+        if tracer is None:
+            tracing = (c for c in reversed(_ACTIVE_CONTEXTS.get()) if c.tracing)
+            tracer = next(tracing, None)
+        if tracer is not None:
             filename = frame.f_code.co_filename
             lineno = frame.f_lineno
-            self.tracing_logger.log(
-                self.tracing_log_level,
+            tracer.tracing_logger.log(
+                tracer.tracing_log_level,
                 f"ContextData {context_data.name} from {context_data.declaring_cls} {op} by {filename}:{lineno}",
             )
-        if self.parent is not None:
-            self.parent._trace(context_data, op, frame)
 
 
 # A ContextVar rather than a thread-local: each asyncio task gets its own copy, so
-# concurrent tasks on one thread never see each other's active Context.
-_CURRENT_CONTEXT: ContextVar[Context | None] = ContextVar(
-    "safetydance_context", default=None
+# concurrent tasks on one thread never see each other's active stack. The stack is an
+# immutable tuple so that copy_context() snapshots stay independent.
+_ACTIVE_CONTEXTS: ContextVar[tuple[Context, ...]] = ContextVar(
+    "safetydance_active_contexts", default=()
 )
 
 
@@ -207,13 +210,13 @@ def get_context() -> Context:
     Raises NoActiveContext when called outside a @script (or @context) function or a
     `with Context():` block.
     """
-    current = _CURRENT_CONTEXT.get()
-    if current is None:
+    stack = _ACTIVE_CONTEXTS.get()
+    if not stack:
         raise NoActiveContext(
             "No active context: call this from a @script (or @context) function, "
             "or inside `with Context():`."
         )
-    return current
+    return stack[-1]
 
 
 class _GeneratorInContext:

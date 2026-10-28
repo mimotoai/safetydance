@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import threading
 from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor
 
@@ -169,3 +170,54 @@ def test_worker_thread_shares_context_via_copy_context():
         pool.submit(copy_context().run, step_on_worker).result()
 
     assert slot.value == "from worker"
+
+
+def test_shared_context_on_two_threads_keeps_each_threads_context():
+    outer, shared = Context(), Context()
+    t1_inside = threading.Event()
+    t2_done = threading.Event()
+
+    def first():
+        with outer:
+            with shared:
+                t1_inside.set()
+                assert t2_done.wait(timeout=5)
+            return get_context()
+
+    def second():
+        assert t1_inside.wait(timeout=5)
+        with shared:
+            pass
+        t2_done.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_done = pool.submit(first)
+        second_done = pool.submit(second)
+        assert first_done.result() is outer
+        second_done.result()
+
+
+def test_shared_context_on_two_tasks_keeps_each_tasks_context():
+    outer, shared = Context(), Context()
+
+    async def both():
+        t1_inside = asyncio.Event()
+        t2_done = asyncio.Event()
+
+        async def first():
+            with outer:
+                with shared:
+                    t1_inside.set()
+                    await t2_done.wait()
+                return get_context()
+
+        async def second():
+            await t1_inside.wait()
+            with shared:
+                pass
+            t2_done.set()
+
+        return await asyncio.wait_for(asyncio.gather(first(), second()), timeout=5)
+
+    active_after_exit, _ = asyncio.run(both())
+    assert active_after_exit is outer

@@ -145,6 +145,19 @@ def test_reentering_context_from_further_up_the_chain_raises():
         assert nested_data(inner) == "still usable"
 
 
+def test_exiting_a_context_that_is_not_innermost_raises():
+    outer, inner = Context(), Context()
+    outer.__enter__()
+    inner.__enter__()
+    with pytest.raises(RuntimeError):
+        outer.__exit__(None, None, None)
+    assert get_context() is inner
+    inner.__exit__(None, None, None)
+    outer.__exit__(None, None, None)
+    with pytest.raises(RuntimeError):
+        outer.__exit__(None, None, None)
+
+
 def test_reused_context_on_new_thread_has_no_stale_parent():
     with Context() as outer:
         with Context() as reused:
@@ -169,3 +182,19 @@ def test_tracing_propagates_to_empty_parent(caplog):
         with Context():
             nested_data.value = "traced"
     assert any("set by" in record.message for record in caplog.records)
+
+
+def test_nested_tracing_logs_each_event_once(caplog):
+    caplog.set_level(logging.INFO)
+    logger = logging.getLogger("safetydance")
+
+    @context(tracing_logger=logger)
+    def inner():
+        nested_data.value = "traced"
+
+    @context(tracing_logger=logger)
+    def outer():
+        inner()
+
+    outer()
+    assert len([r for r in caplog.records if "set by" in r.message]) == 1
