@@ -1,10 +1,11 @@
 import logging
 import threading
+from collections.abc import MutableMapping
 from functools import wraps
 from inspect import currentframe
 from logging import Logger
 from types import FrameType
-from typing import Any, Callable, Dict, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar
 
 
 T = TypeVar("T")
@@ -81,7 +82,7 @@ class ContextProperty(Generic[T]):
         )
 
 
-class Context(Dict[ContextProperty | str, Any]):
+class Context(MutableMapping[ContextProperty | str, Any]):
     def __init__(
         self,
         *args,
@@ -94,28 +95,46 @@ class Context(Dict[ContextProperty | str, Any]):
         self.tracing_logger = tracing_logger or logging.getLogger()
         self.tracing_log_level = tracing_log_level
         self.parent = None
-        super().__init__(*args, **kwargs)
+        self._data = dict(*args, **kwargs)
 
+    # Every Context owns its storage: a nested Context (and so a nested script) never
+    # reads or writes its parent's values. To share a context, call a step (a plain
+    # function) rather than a script. `parent` is the Context that was active on
+    # entry; it is restored on exit and receives trace messages while nested.
     def __getitem__(self, key):
-        if self.parent:
-            return self.parent.__getitem__(key)
-        return super().__getitem__(key)
+        return self._data[key]
 
     def __setitem__(self, key, value):
-        if self.parent:
-            return self.parent.__setitem__(key)
-        return super().__setitem__(key, value)
+        self._data[key] = value
+
+    def __delitem__(self, key):
+        del self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self):
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"Context({self._data!r})"
 
     def __enter__(self) -> "Context":
         global THREAD_LOCALS
-        if hasattr(THREAD_LOCALS, "context"):
-            self.parent = THREAD_LOCALS.context
+        parent = getattr(THREAD_LOCALS, "context", None)
+        ancestor = parent
+        while ancestor is not None:
+            if ancestor is self:
+                raise RuntimeError(f"{self!r} is already active")
+            ancestor = ancestor.parent
+        self.parent = parent
         THREAD_LOCALS.context = self
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         global THREAD_LOCALS
         THREAD_LOCALS.context = self.parent
+        self.parent = None
 
     def _trace(self, context_data: ContextProperty, op: str, frame: FrameType):
         if self.tracing:
@@ -125,7 +144,7 @@ class Context(Dict[ContextProperty | str, Any]):
                 self.tracing_log_level,
                 f"ContextData {context_data.name} from {context_data.declaring_cls} {op} by {filename}:{lineno}",
             )
-        if self.parent:
+        if self.parent is not None:
             self.parent._trace(context_data, op, frame)
 
 
