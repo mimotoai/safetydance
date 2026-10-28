@@ -23,6 +23,8 @@ ENTRY_POINT_GROUP = "safetydance.steps"
 
 _Path = tuple[str, ...]
 _Key = tuple[Any, ...]
+# One registration, (tier, path, key), as recorded while an entry point loads.
+_Record = tuple[str, _Path, _Key]
 
 
 class StepNotFound(AttributeError):
@@ -117,20 +119,22 @@ def _dotted(path: _Path) -> str:
 
 
 class _Registry:
-    def __init__(self, entry_points: Callable[[], Iterable[Any]] = _installed_entry_points):
-        # Not called here: entry points are read lazily, on lookup.
-        self._entry_points = entry_points
+    def __init__(self, read_entry_points: Callable[[], Iterable[Any]] = _installed_entry_points):
+        # Not called here: entry points are read lazily, on the first lookup.
+        self._read_entry_points = read_entry_points
         self._lock = threading.Lock()
         # Held while entry points load. Never acquired while _lock is held: a loading
         # module registers steps, which takes _lock. Reentrant, so a module may look
-        # steps up while it is being imported. Known limit: if a module does a root
-        # lookup during its import while another thread loads an entry point that
-        # imports the same module, the two threads deadlock; once every entry point
-        # has loaded, the lock-free path rules this out.
+        # steps up while it is being imported. Known limit: if a module does a lookup
+        # during its import while another thread loads an entry point that imports
+        # the same module, the two threads deadlock; once every entry point has
+        # loaded, the lock-free path rules this out.
         self._load_lock = threading.RLock()
         self._unloaded: list[Any] | None = None
-        self._entry_point_names: frozenset[str] = frozenset()
         self._loading: set[int] = set()
+        # Per thread: what each entry point the thread is loading has registered,
+        # innermost last, so that a failed load can remove it.
+        self._local = threading.local()
         self._explicit: dict[_Path, tuple[_Key, Callable[..., Any]]] = {}
         self._default: dict[_Path, dict[_Key, Callable[..., Any]]] = {}
         # Every proper prefix of a registered path, mapped to its child names; the
@@ -141,6 +145,23 @@ class _Registry:
         for i in range(len(path)):
             self._children.setdefault(path[:i], set()).add(path[i])
 
+    def _rebuild_children(self) -> None:
+        self._children = {}
+        for path in (*self._default, *self._explicit):
+            self._add_prefixes(path)
+
+    def _journals(self) -> list[list[_Record]]:
+        journals: list[list[_Record]] | None = getattr(self._local, "journals", None)
+        if journals is None:
+            journals = self._local.journals = []
+        return journals
+
+    def _record(self, tier: str, path: _Path, key: _Key) -> None:
+        # Thread-local, so another thread's registrations never count as the load's.
+        journals = self._journals()
+        if journals:
+            journals[-1].append((tier, path, key))
+
     def add_default(self, f: Callable[..., Any], namespace: _Path | None) -> None:
         name = _step_name(f)
         key = _step_key(f)
@@ -149,8 +170,11 @@ class _Registry:
             paths.append((*namespace, name))
         with self._lock:
             for path in paths:
+                registered = self._default.setdefault(path, {})
+                if key not in registered:
+                    self._record("default", path, key)
                 # The same step registered again replaces the stored object.
-                self._default.setdefault(path, {})[key] = f
+                registered[key] = f
                 self._add_prefixes(path)
 
     def add_explicit(self, f: Callable[..., Any], namespace: _Path) -> None:
@@ -173,54 +197,72 @@ class _Registry:
                             f"{_full_name(f)} there."
                         )
             for path, items in bindings.items():
+                if path not in self._explicit:
+                    self._record("explicit", path, items[-1][0])
                 self._explicit[path] = items[-1]
                 self._add_prefixes(path)
 
-    def _all_loaded(self) -> bool:
+    def _roll_back(self, records: list[_Record]) -> None:
+        with self._lock:
+            for tier, path, key in records:
+                if tier == "explicit":
+                    bound = self._explicit.get(path)
+                    if bound is not None and bound[0] == key:
+                        del self._explicit[path]
+                    continue
+                registered = self._default.get(path)
+                if registered is not None:
+                    registered.pop(key, None)
+                    if not registered:
+                        del self._default[path]
+            self._rebuild_children()
+
+    def _load(self, ep: Any) -> None:
+        journals = self._journals()
+        records: list[_Record] = []
+        journals.append(records)
+        self._loading.add(id(ep))
+        try:
+            ep.load()
+        except BaseException as e:
+            # So that a retry registers the module's steps afresh.
+            self._roll_back(records)
+            where = f"entry point {ep.name!r} ({ep.value}) in group {ENTRY_POINT_GROUP!r}"
+            if isinstance(e, AttributeError):
+                # Raised out of __getattr__, it would read as a missing step.
+                raise ImportError(f"{where} failed to load: {e}") from e
+            note = f"While loading {where}"
+            if hasattr(e, "add_note") and note not in getattr(e, "__notes__", ()):
+                e.add_note(note)
+            raise
+        finally:
+            journals.pop()
+            self._loading.discard(id(ep))
+
+    def _load_entry_points(self) -> None:
+        """
+        Load every entry point not loaded yet.
+
+        Everything installed loads before the first lookup resolves, so no result
+        depends on which lookups came first.
+        """
         # The list only shrinks, and only after a load returns, so empty means done.
-        return self._unloaded == []
-
-    def _load_entry_points(self, name: str | None) -> None:
-        """
-        Load the not-yet-loaded entry points called ``name``, or all of them.
-
-        All of them also when no entry point at all is called ``name``: a root name
-        that is not an entry point's may be a step that any of them registers.
-        """
-        if self._all_loaded():
+        if self._unloaded == []:
             return
         with self._load_lock:
             if self._unloaded is None:
-                unloaded = list(self._entry_points())
-                self._entry_point_names = frozenset(ep.name for ep in unloaded)
-                self._unloaded = unloaded
-            if name not in self._entry_point_names:
-                name = None
+                self._unloaded = list(self._read_entry_points())
             for ep in list(self._unloaded):
-                # Skip one this thread is already loading, as a circular import would.
-                if (name is not None and ep.name != name) or id(ep) in self._loading:
+                # Skip one this thread is already loading, as a circular import would,
+                # and one that a lookup made during an earlier load has loaded.
+                if id(ep) in self._loading or not any(ep is p for p in self._unloaded):
                     continue
-                # A lookup made while an earlier one was loading may have loaded it.
-                if not any(ep is pending for pending in self._unloaded):
-                    continue
-                self._loading.add(id(ep))
-                try:
-                    ep.load()
-                finally:
-                    self._loading.discard(id(ep))
+                self._load(ep)
                 # Only once load() returns, so a failed load raises again next time.
-                self._unloaded = [pending for pending in self._unloaded if pending is not ep]
+                self._unloaded = [p for p in self._unloaded if p is not ep]
 
     def resolve(self, path: _Path) -> Any:
-        if len(path) == 1:
-            self._load_entry_points(path[0])
-        try:
-            return self._resolve(path)
-        except StepNotFound:
-            # Any entry point may extend a namespace or settle an ambiguity.
-            if self._all_loaded():
-                raise
-        self._load_entry_points(None)
+        self._load_entry_points()
         return self._resolve(path)
 
     def _resolve(self, path: _Path) -> Any:
@@ -286,9 +328,10 @@ class StepPrefix:
     step raises ``AmbiguousStep``. The full module path is unique, except for steps
     made by one factory (closures) and bound methods, which need an explicit
     registration with ``register_steps`` or a short namespace. Names starting with
-    ``_`` are never steps and raise a plain ``AttributeError``. The step returned is
-    the registered function itself, so it runs in whatever context is active where
-    it is called.
+    ``_`` are never steps and raise a plain ``AttributeError``. The first lookup
+    imports every module exposed through a ``safetydance.steps`` entry point. The
+    step returned is the registered function itself, so it runs in whatever context
+    is active where it is called.
     """
 
     def __getattr__(self, name: str) -> Any:

@@ -20,7 +20,7 @@ from safetydance._steps import (
 
 @pytest.fixture(autouse=True)
 def registry(monkeypatch):
-    fresh = _steps._Registry(entry_points=lambda: ())
+    fresh = _steps._Registry(read_entry_points=lambda: ())
     monkeypatch.setattr(_steps, "_registry", fresh)
     return fresh
 
