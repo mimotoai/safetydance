@@ -678,3 +678,47 @@ def test_failed_load_keeps_a_step_registered_before_it(installed):
     _, default, _ = registry_state()
     assert [g for g in default[("get",)].values()] == [get]
     assert any(g is get for g in default[tuple(get.__module__.split(".")) + ("get",)].values())
+
+
+def make_rebinding_load(tier):
+    """A load whose module registers a step, rebinds its value, re-registers it, fails."""
+    from safetydance._steps import register_steps as bind
+
+    def factory():
+        box = object()
+
+        def get():
+            return box
+
+        def rebind():
+            nonlocal box
+            box = object()
+
+        return get, rebind
+
+    get, rebind = factory()
+    register = "step(get)" if tier == "default" else "bind(get, namespace='chosen')"
+
+    def load():
+        namespace = {
+            "__name__": "sd_ep_rebinder",
+            "get": get,
+            "rebind": rebind,
+            "step": step,
+            "bind": bind,
+        }
+        exec(f"{register}\nrebind()\n{register}\nraise RuntimeError('boom')\n", namespace)
+
+    return get, load
+
+
+@pytest.mark.parametrize("tier", ["default", "explicit"])
+def test_failed_load_removes_a_step_it_registered_and_re_registered(installed, tier):
+    get, load = make_rebinding_load(tier)
+    installed.entry_points[:] = [FakeEntryPoint("rebinder", load)]
+    with pytest.raises(RuntimeError, match="boom"):
+        Given.get
+    explicit, default, children = registry_state()
+    assert not any(g is get for registered in default.values() for g in registered.values())
+    assert not any(bound is get for _, bound in explicit.values())
+    assert (explicit, default, children) == ({}, {}, {})

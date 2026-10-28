@@ -295,6 +295,14 @@ class _Registry:
         if journals:
             journals[-1].append((tier, path, key, module))
 
+    def _recorded(self, tier: str, path: _Path, keys: list[_Key]) -> bool:
+        """Whether the current load registered one of ``keys`` at ``path``."""
+        journals = self._journals()
+        return bool(journals) and any(
+            record[0] == tier and record[1] == path and record[2] in keys
+            for record in journals[-1]
+        )
+
     def _importer(self) -> str | None:
         """
         The module whose import is registering steps, while an entry point loads.
@@ -332,9 +340,11 @@ class _Registry:
                 stale = [k for k, g in registered.items() if g is f and k != key]
                 for old in stale:
                     del registered[old]
-                # A replaced entry was registered before, so a failed load that
-                # replaces it must not roll it back; the explicit tier does the same.
-                if key not in registered and not stale:
+                # A replaced entry made before this load must survive its rollback;
+                # one made during it goes, under its new key. As in the explicit tier.
+                if key not in registered and (
+                    not stale or self._recorded("default", path, stale)
+                ):
                     self._record("default", path, key, importer)
                 # The same step registered again replaces the stored object.
                 registered[key] = f
@@ -351,7 +361,11 @@ class _Registry:
             for path, items in bindings.items():
                 self._check_explicit(path, items)
             for path, items in bindings.items():
-                if path not in self._explicit:
+                existing = self._explicit.get(path)
+                if existing is None or (
+                    existing[0] != items[-1][0]
+                    and self._recorded("explicit", path, [existing[0]])
+                ):
                     module = importer or items[-1][1].__module__
                     self._record("explicit", path, items[-1][0], module)
                 self._explicit[path] = items[-1]
