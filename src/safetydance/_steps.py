@@ -67,11 +67,27 @@ def _step_key(f: Callable[..., Any]) -> _Key:
     code = getattr(target, "__code__", None)
     if code is None:
         return ("<object>", id(f), qualname)
-    return (code.co_filename, code.co_firstlineno, qualname)
+    key = (code.co_filename, code.co_firstlineno, qualname)
+    # Closures from one factory share their code but may capture different values.
+    if getattr(target, "__closure__", None):
+        return (*key, id(f))
+    return key
 
 
 def _full_name(f: Callable[..., Any]) -> str:
     return f"{f.__module__}.{f.__name__}"
+
+
+def _candidate_names(steps: list[Callable[..., Any]]) -> list[str]:
+    names = [_full_name(f) for f in steps]
+    labels = []
+    for name, f in zip(names, steps):
+        code = getattr(unwrap(f), "__code__", None)
+        # A full name alone cannot tell apart candidates that share it.
+        if code is not None and names.count(name) > 1:
+            name = f"{name} ({code.co_filename}:{code.co_firstlineno})"
+        labels.append(name)
+    return sorted(labels)
 
 
 def _dotted(path: _Path) -> str:
@@ -113,7 +129,7 @@ class _Registry:
         if explicit is not None:
             return explicit[1]
         if len(defaults) > 1:
-            candidates = ", ".join(sorted(_full_name(f) for f in defaults))
+            candidates = ", ".join(_candidate_names(defaults))
             raise AmbiguousStep(
                 f"Step '{_dotted(path)}' is ambiguous; it could be any of: {candidates}. "
                 "Use the full module path to choose one."

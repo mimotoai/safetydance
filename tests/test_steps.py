@@ -93,6 +93,45 @@ def test_module_imported_under_two_names_is_not_ambiguous():
     assert Given.http.get() == "x"
 
 
+def make_namespaced_step(ns, result):
+    @step_namespace(ns)
+    def get():
+        return result
+
+    return get
+
+
+def test_closures_from_one_factory_are_distinct_steps():
+    make_namespaced_step("api", "api")
+    make_namespaced_step("admin", "admin")
+    assert Given.api.get() == "api"
+    assert Given.admin.get() == "admin"
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    module = Given
+    for segment in __name__.split("."):
+        module = getattr(module, segment)
+    with pytest.raises(AmbiguousStep):
+        module.get
+
+
+def test_ambiguity_message_locates_candidates_sharing_a_name():
+    api = make_namespaced_step("api", "api")
+    make_namespaced_step("admin", "admin")
+    code = api.__code__
+    location = f"{code.co_filename}:{code.co_firstlineno}"
+    with pytest.raises(AmbiguousStep) as err:
+        Given.get
+    assert str(err.value).count(location) == 2
+
+
+def test_same_closure_registered_twice_is_not_ambiguous():
+    get = make_namespaced_step("api", "api")
+    step(get)
+    assert Given.get() == "api"
+    assert Given.api.get() == "api"
+
+
 def test_step_and_namespace_at_one_path_is_ambiguous():
     step(make_step("m", "http"))
     step_namespace("http")(make_step("n", "get"))
