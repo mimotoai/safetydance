@@ -1,4 +1,5 @@
 import safetydance
+from safetydance import _steps
 
 
 def test_star_import_exports_only_the_public_api():
@@ -44,7 +45,9 @@ def test_importing_test_context_does_not_add_a_pytest_test(pytester):
     result.assert_outcomes(passed=1)
 
 
-def test_star_import_brings_prefixes(pytester):
+def test_star_import_brings_prefixes(pytester, monkeypatch):
+    # pytester runs in this process, so give its steps a registry of their own.
+    monkeypatch.setattr(_steps, "_registry", _steps._Registry(entry_points=lambda: ()))
     pytester.makepyfile(
         """
         from safetydance import *

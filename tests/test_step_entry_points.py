@@ -6,7 +6,7 @@ import time
 import pytest
 
 from safetydance import _steps
-from safetydance._steps import Given, StepNotFound
+from safetydance._steps import AmbiguousStep, Given, StepNotFound, step
 
 MODULE = "sd_ep_steps"
 
@@ -58,6 +58,23 @@ def installed(tmp_path, monkeypatch):
     sys.modules.pop(MODULE, None)
 
 
+@pytest.fixture
+def add_entry_point(installed, tmp_path):
+    """Install one more entry point, whose module has the given source."""
+    modules = []
+
+    def add(name, module, source):
+        (tmp_path / f"{module}.py").write_text(source)
+        modules.append(module)
+        entry_point = FakeEntryPoint(name, lambda: importlib.import_module(module))
+        installed.entry_points.append(entry_point)
+        return entry_point
+
+    yield add
+    for module in modules:
+        sys.modules.pop(module, None)
+
+
 def test_namespace_lookup_imports_the_entry_point(installed):
     assert MODULE not in sys.modules
     assert Given.http.get() == "ep"
@@ -80,8 +97,61 @@ def test_entry_points_are_read_once(installed):
     assert installed.reads == 1
 
 
-def test_bare_miss_loads_every_entry_point_and_retries(installed):
+def test_bare_name_loads_every_entry_point_first(installed):
+    # No entry point is named "get", so any of them may register it.
     assert Given.get() == "ep"
+    assert installed.entry_points[0].loads == 1
+
+
+def test_bare_name_lookup_is_independent_of_order(installed):
+    @step
+    def get():
+        return "local"
+
+    # The entry point's module registers a get too, so even the first lookup sees two.
+    with pytest.raises(AmbiguousStep):
+        Given.get
+
+
+def test_shared_namespace_extended_by_another_entry_point(add_entry_point):
+    uploads = add_entry_point(
+        "uploads",
+        "sd_ep_uploads",
+        "from safetydance import step_namespace\n"
+        "step = step_namespace('http')\n"
+        "@step\n"
+        "def upload():\n"
+        "    return 'uploaded'\n",
+    )
+    assert Given.http.upload() == "uploaded"
+    assert uploads.loads == 1
+
+
+def test_named_root_lookup_stays_lazy(installed):
+    unrelated = FakeEntryPoint("other", lambda: None)
+    installed.entry_points.append(unrelated)
+    assert Given.http.get() == "ep"
+    assert installed.entry_points[0].loads == 1
+    assert unrelated.loads == 0
+
+
+def test_root_ambiguity_triggers_load_all_and_retry(add_entry_point):
+    # A local step named http makes the root both a step and a namespace once the
+    # "http" entry point loads; a later entry point binds http explicitly.
+    @step
+    def http():
+        return "local"
+
+    chooser = add_entry_point(
+        "chooser",
+        "sd_ep_chooser",
+        "from safetydance import register_steps\n"
+        "def http():\n"
+        "    return 'chosen'\n"
+        "register_steps(http)\n",
+    )
+    assert Given.http() == "chosen"
+    assert chooser.loads == 1
 
 
 def test_entry_point_import_error_propagates(installed):
@@ -153,7 +223,13 @@ def test_concurrent_first_lookups_load_once(installed):
     assert slow.loads == 1
 
 
-def test_installed_entry_points_reads_the_group():
-    entry_points = _steps._installed_entry_points()
-    for entry_point in entry_points:
-        assert entry_point.group == "safetydance.steps"
+def test_installed_entry_points_reads_the_group(monkeypatch):
+    calls = []
+
+    def entry_points(**kwargs):
+        calls.append(kwargs)
+        return ["ep"]
+
+    monkeypatch.setattr(_steps, "entry_points", entry_points)
+    assert list(_steps._installed_entry_points()) == ["ep"]
+    assert calls == [{"group": "safetydance.steps"}]

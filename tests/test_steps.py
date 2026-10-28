@@ -134,10 +134,23 @@ def test_same_closure_registered_twice_is_not_ambiguous():
 
 
 def test_step_and_namespace_at_one_path_is_ambiguous():
-    step(make_step("m", "http"))
+    step(make_step("m", "http", "m"))
     step_namespace("http")(make_step("n", "get"))
-    with pytest.raises(AmbiguousStep, match="both a step and a namespace"):
+    with pytest.raises(AmbiguousStep, match=r"both a step and a namespace.*m\.http"):
         Given.http
+    assert Given.m.http() == "m"
+
+
+def test_step_named_like_its_module_root_is_not_advised_its_full_path():
+    # Given.login.login fails too: the root segment is checked first.
+    step(make_step("login", "login"))
+    with pytest.raises(AmbiguousStep, match="both a step and a namespace") as err:
+        Given.login
+    message = str(err.value)
+    assert "full module path" not in message
+    assert "login.login" not in message
+    assert "step_namespace" in message
+    assert "register_steps(..., namespace=...)" in message
 
 
 def test_unknown_name_raises_step_not_found():
@@ -145,6 +158,13 @@ def test_unknown_name_raises_step_not_found():
         Given.nope
     assert hasattr(Given, "nope") is False
     assert getattr(Given, "nope", 1) == 1
+
+
+def test_step_not_found_message_has_no_final_period():
+    # Python may append ". Did you mean ...?" to an AttributeError's message.
+    with pytest.raises(StepNotFound) as err:
+        Given.nope
+    assert str(err.value).endswith("'safetydance.steps' entry point")
 
 
 def test_unknown_name_under_namespace_names_the_path():
@@ -278,6 +298,48 @@ def test_ambiguity_hint_names_every_way_out():
     step(make_step("pkg_b.steps", "get"))
     with pytest.raises(AmbiguousStep, match=r"full module path.*namespace.*register_steps"):
         Given.get
+
+
+class Client:
+    def __init__(self, name):
+        self.name = name
+
+    def fetch(self):
+        return self.name
+
+
+class SuperClient(Client):
+    # super() gives the method a __class__ cell, so it has a __closure__.
+    def fetch(self):
+        return super().fetch()
+
+
+@pytest.mark.parametrize("cls", [Client, SuperClient])
+def test_bound_methods_of_different_instances_are_distinct_steps(cls):
+    step(cls("a").fetch)
+    step(cls("b").fetch)
+    with pytest.raises(AmbiguousStep):
+        Given.fetch
+
+
+@pytest.mark.parametrize("cls", [Client, SuperClient])
+def test_explicit_bound_methods_of_different_instances_conflict(cls):
+    register_steps(cls("a").fetch)
+    with pytest.raises(ValueError):
+        register_steps(cls("b").fetch)
+    assert Given.fetch() == "a"
+
+
+@pytest.mark.parametrize("cls", [Client, SuperClient])
+def test_same_bound_method_registered_twice_is_one_step(cls):
+    client = cls("a")
+    # Each attribute access makes a new bound method object.
+    step(client.fetch)
+    step(client.fetch)
+    assert Given.fetch() == "a"
+    register_steps(client.fetch, namespace="x")
+    register_steps(client.fetch, namespace="x")
+    assert Given.x.fetch() == "a"
 
 
 count = ContextProperty[int](initializer=lambda ctx: 0)

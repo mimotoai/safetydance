@@ -1,7 +1,7 @@
 import keyword
 import threading
 from importlib.metadata import entry_points
-from inspect import unwrap
+from inspect import ismethod, unwrap
 from typing import Any, Callable, Iterable, TypeVar
 
 __all__ = [
@@ -39,7 +39,9 @@ class AmbiguousStep(StepNotFound):
     Raised when a name looked up on a prefix could mean more than one thing.
 
     That is, several distinct steps share the name, or the name is both a step and
-    a namespace. Look the step up by its full module path instead.
+    a namespace. A step's full module path is unique, except for steps made by one
+    factory (closures) and bound methods: give those an explicit registration with
+    ``register_steps``, or a short namespace.
     """
 
 
@@ -82,10 +84,15 @@ def _step_key(f: Callable[..., Any]) -> _Key:
     code = getattr(target, "__code__", None)
     if code is None:
         return ("<object>", id(f), qualname)
-    key = (code.co_filename, code.co_firstlineno, qualname)
+    key: _Key = (code.co_filename, code.co_firstlineno, qualname)
+    # A bound method forwards __code__, so methods of different instances share it.
+    method = next((m for m in (target, f) if ismethod(m)), None)
+    if method is not None:
+        key = (*key, id(method.__self__))
     # Closures from one factory share their code but may capture different values.
+    # A bound method is made afresh on each attribute access, so key its function.
     if getattr(target, "__closure__", None):
-        return (*key, id(f))
+        return (*key, id(f if method is None else method.__func__))
     return key
 
 
@@ -122,6 +129,7 @@ class _Registry:
         # has loaded, the lock-free path rules this out.
         self._load_lock = threading.RLock()
         self._unloaded: list[Any] | None = None
+        self._entry_point_names: frozenset[str] = frozenset()
         self._loading: set[int] = set()
         self._explicit: dict[_Path, tuple[_Key, Callable[..., Any]]] = {}
         self._default: dict[_Path, dict[_Key, Callable[..., Any]]] = {}
@@ -168,14 +176,26 @@ class _Registry:
                 self._explicit[path] = items[-1]
                 self._add_prefixes(path)
 
-    def _load_entry_points(self, name: str | None) -> None:
-        """Load every not-yet-loaded entry point called ``name``, or all of them."""
+    def _all_loaded(self) -> bool:
         # The list only shrinks, and only after a load returns, so empty means done.
-        if self._unloaded == []:
+        return self._unloaded == []
+
+    def _load_entry_points(self, name: str | None) -> None:
+        """
+        Load the not-yet-loaded entry points called ``name``, or all of them.
+
+        All of them also when no entry point at all is called ``name``: a root name
+        that is not an entry point's may be a step that any of them registers.
+        """
+        if self._all_loaded():
             return
         with self._load_lock:
             if self._unloaded is None:
-                self._unloaded = list(self._entry_points())
+                unloaded = list(self._entry_points())
+                self._entry_point_names = frozenset(ep.name for ep in unloaded)
+                self._unloaded = unloaded
+            if name not in self._entry_point_names:
+                name = None
             for ep in list(self._unloaded):
                 # Skip one this thread is already loading, as a circular import would.
                 if (name is not None and ep.name != name) or id(ep) in self._loading:
@@ -192,13 +212,14 @@ class _Registry:
                 self._unloaded = [pending for pending in self._unloaded if pending is not ep]
 
     def resolve(self, path: _Path) -> Any:
-        if len(path) > 1:
-            return self._resolve(path)
-        self._load_entry_points(path[0])
+        if len(path) == 1:
+            self._load_entry_points(path[0])
         try:
             return self._resolve(path)
         except StepNotFound:
-            pass
+            # Any entry point may extend a namespace or settle an ambiguity.
+            if self._all_loaded():
+                raise
         self._load_entry_points(None)
         return self._resolve(path)
 
@@ -217,17 +238,24 @@ class _Registry:
                 "register_steps(..., namespace=...) to choose one."
             )
         if defaults and is_namespace:
-            raise AmbiguousStep(
-                f"'{_dotted(path)}' is both a step and a namespace; use the step's full "
-                f"module path, {_full_name(defaults[0])}, to call the step."
-            )
+            found = defaults[0]
+            # A full module path that starts at this same root is just as ambiguous.
+            if found.__module__.split(".")[0] == path[0]:
+                hint = (
+                    "give the step a short namespace with step_namespace, or bind it "
+                    "with register_steps(..., namespace=...)."
+                )
+            else:
+                hint = f"use the step's full module path, {_full_name(found)}, to call it."
+            raise AmbiguousStep(f"'{_dotted(path)}' is both a step and a namespace; {hint}")
         if defaults:
             return defaults[0]
         if is_namespace:
             return _StepNamespace(path)
         raise StepNotFound(
             f"No step named '{_dotted(path)}'. Steps are found only once their module "
-            f"is imported or exposed through a {ENTRY_POINT_GROUP!r} entry point."
+            # No final period: Python may append ". Did you mean ...?".
+            f"is imported or exposed through a {ENTRY_POINT_GROUP!r} entry point"
         )
 
     def child_names(self, path: _Path) -> list[str]:
@@ -252,12 +280,15 @@ class StepPrefix:
 
         Given.get("/x")                     # bare name, when only one step has it
         Given.http.get("/x")                # namespace given to step_namespace
-        Given.my_package.steps.get("/x")    # full module path, never ambiguous
+        Given.my_package.steps.get("/x")    # full module path
 
     A missing name raises ``StepNotFound``; a name that could mean more than one
-    step raises ``AmbiguousStep``. Names starting with ``_`` are never steps and
-    raise a plain ``AttributeError``. The step returned is the registered function
-    itself, so it runs in whatever context is active where it is called.
+    step raises ``AmbiguousStep``. The full module path is unique, except for steps
+    made by one factory (closures) and bound methods, which need an explicit
+    registration with ``register_steps`` or a short namespace. Names starting with
+    ``_`` are never steps and raise a plain ``AttributeError``. The step returned is
+    the registered function itself, so it runs in whatever context is active where
+    it is called.
     """
 
     def __getattr__(self, name: str) -> Any:
