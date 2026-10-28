@@ -40,13 +40,21 @@ __all__ = [
 
 
 class NoActiveContext(RuntimeError):
-    """Raised when a Context is needed but none is active."""
+    """
+    Raised when a Context is needed but none is active.
+
+    ``get_context()`` and ``ContextProperty.value`` raise it when called outside a
+    ``@script`` (or ``@context``) function and outside a ``with Context():`` block.
+    """
 
 
 class ContextDataNotSet(KeyError, AttributeError):
     """
-    Raised when a context value is read before it was set. It is also an
-    AttributeError so that hasattr() and getattr(default) work on context_data fields.
+    Raised when a context value is read before it was set.
+
+    It is both a ``KeyError`` and an ``AttributeError``, so ``hasattr()`` and
+    ``getattr(obj, name, default)`` work on ``context_data`` fields. Reading a field
+    outside any context raises it too.
     """
 
 
@@ -56,6 +64,28 @@ R = TypeVar("R")
 
 
 class ContextProperty(Generic[T]):
+    """
+    A typed key into a Context. Each field of a ``context_data`` class is one.
+
+    Read and write the value in the active context with ``prop.value``, or in an
+    explicit context with ``prop(ctx)`` and ``prop[ctx] = new_value``::
+
+        prop.value = 3
+        prop.value             # 3
+        prop(other_ctx)        # read in other_ctx
+        prop[other_ctx] = 4    # write in other_ctx
+
+    A read finds, in order, the value stored for this property, a value supplied by
+    ``name`` (such as a pytest fixture given to ``test_context``), and then the
+    result of the initializer, which is stored. Otherwise it raises
+    ``ContextDataNotSet``.
+
+    :param name: the field name; also the key used to find values supplied by name.
+    :param description: free-form text describing the property.
+    :param initializer: called with the Context on the first read to produce a value.
+    :param declaring_cls: the class that declares the property.
+    """
+
     name: str | None
     description: str | None
     initializer: Callable[["Context"], T] | None
@@ -77,6 +107,12 @@ class ContextProperty(Generic[T]):
 
     @property
     def value(self) -> T:
+        """
+        The value in the active context, readable and writable.
+
+        Raises ``NoActiveContext`` when no context is active and ``ContextDataNotSet``
+        when there is no value to read.
+        """
         return self._get(get_context(), sys._getframe(1))
 
     @value.setter
@@ -84,9 +120,11 @@ class ContextProperty(Generic[T]):
         self._set(get_context(), new_value, sys._getframe(1))
 
     def __call__(self, context: "Context") -> T:
+        """Read the value in ``context`` instead of the active context."""
         return self._get(context, sys._getframe(1))
 
     def __setitem__(self, context: "Context", new_value: T):
+        """Write the value in ``context`` instead of the active context: ``prop[ctx] = v``."""
         self._set(context, new_value, sys._getframe(1))
 
     # Values are stored under _key (the property itself, or the base class's property
@@ -126,6 +164,13 @@ class ContextProperty(Generic[T]):
 
     @property
     def has_value(self) -> bool:
+        """
+        Whether a read in the active context would produce a value.
+
+        True if a value is stored for the property, one is supplied by name, or an
+        initializer or default can produce one. Nothing is initialized by asking.
+        Raises ``NoActiveContext`` when no context is active.
+        """
         context = get_context()
         return bool(
             (self.name and self.name in context)
@@ -135,6 +180,26 @@ class ContextProperty(Generic[T]):
 
 
 class Context(MutableMapping[ContextProperty | str, Any]):
+    """
+    A mapping that holds the values of ContextProperty keys (or plain string names).
+
+    Every Context owns its storage; a nested Context never reads or writes its
+    parent's values. Use it as a context manager to make it the active context::
+
+        with Context() as ctx:
+            Cart.items.value = ["apple"]
+
+    Entering a Context that is already active in the current thread or task raises
+    ``RuntimeError``; one Context may be active in several threads or tasks at once.
+    Contexts compare by identity and are hashable.
+
+    :param tracing: log each read, write and delete of context data.
+    :param tracing_logger: the logger to use (default: the root logger).
+    :param tracing_log_level: the level to log at (default: ``logging.INFO``).
+
+    Other positional and keyword arguments initialize the mapping like ``dict()``.
+    """
+
     def __init__(
         self,
         *args,
@@ -217,10 +282,12 @@ _ACTIVE_CONTEXTS: ContextVar[tuple[Context, ...]] = ContextVar(
 
 def get_context() -> Context:
     """
-    Return the active Context, for use by step functions.
+    Return the innermost active Context of the current thread or task.
 
-    Raises NoActiveContext when called outside a @script (or @context) function or a
-    `with Context():` block.
+    Steps call this to reach the context of the script that called them.
+
+    Raises ``NoActiveContext`` when called outside a ``@script`` (or ``@context``)
+    function and outside a ``with Context():`` block.
     """
     stack = _ACTIVE_CONTEXTS.get()
     if not stack:
@@ -351,6 +418,30 @@ def context(
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ) -> Any:
+    """
+    Decorator that runs each call of a function in a fresh, isolated Context.
+
+    Usable bare or with options::
+
+        @script
+        def checkout():
+            add_item("apple")      # a step: shares checkout's context
+
+        @script(tracing_log_level=logging.DEBUG)
+        def traced():
+            ...
+
+    Each call gets its own Context, which is not shared with any other script, even
+    one it calls or is called from. Steps (plain functions) run in their caller's
+    context and reach it with ``get_context()`` or context data. Generator
+    functions, async functions, and callable objects whose ``__call__`` is one are
+    supported; the context stays active while a generator is stepped. Async
+    generator functions raise ``TypeError``.
+
+    ``tracing_logger`` and ``tracing_log_level`` are keyword-only; giving either
+    turns on tracing of context data access. A non-callable positional argument
+    raises ``TypeError``. ``script`` is an alias of ``context``.
+    """
     _require_callable("context", func)
     make_context = _context_factory(tracing_log_level, tracing_logger, False)
 
@@ -387,7 +478,21 @@ def test_context(
     tracing_log_level: int | None = None,
     tracing_logger: Logger | None = None,
 ) -> Any:
-    """Grab the test fixtures and put them into the Context."""
+    """
+    Like ``script``, for tests: the call's keyword arguments are put into the Context.
+
+    The arguments are typically pytest fixtures. Each is stored by name, so a
+    ``context_data`` field with the same name reads it, and ``get_context()["name"]``
+    finds it::
+
+        @test_context
+        def test_cart(tmp_path):
+            assert Storage.tmp_path.value == tmp_path
+
+    The tracing options and the rules for generator, async and callable-object
+    functions are the same as for ``script``. ``test_context`` itself is not
+    collected by pytest.
+    """
     _require_callable("test_context", func)
     make_context = _context_factory(tracing_log_level, tracing_logger, True)
 
@@ -402,6 +507,8 @@ test_context.__test__ = False  # type: ignore[attr-defined]
 
 
 class ContextPropertyDescriptor:
+    """Class attribute that reads and writes a field in the active context."""
+
     def __init__(self, name, context_data):
         self.name = name
         self.context_data = context_data
@@ -427,8 +534,18 @@ class _Initializer:
 
 def initializer(fn: Callable[["Context"], T]) -> T:
     """
-    Mark a context_data default as an initializer, called with the Context on first
-    read. Typed as returning T so that `cart: list[str] = initializer(...)` checks.
+    Mark a context_data default as computed rather than constant.
+
+    ``fn`` is called with the Context on the first read in each context, and the
+    result is stored there. It must be the default of an annotated attribute of a
+    ``context_data`` class, otherwise ``TypeError`` is raised::
+
+        @context_data
+        class Cart:
+            items: list[str] = initializer(lambda ctx: [])
+
+    It is typed as returning ``T`` so that ``cart: list[str] = initializer(...)``
+    type checks.
     """
     return _Initializer(fn)  # type: ignore[return-value]
 
@@ -461,6 +578,28 @@ def _is_classvar(type_hint: Any) -> bool:
 
 
 class ContextData(type):
+    """
+    Metaclass that turns the annotated attributes of a class into context fields.
+
+    Each field reads and writes a value in the active context, never on the class
+    or an instance. ``Cls.field`` reads, ``Cls.field = v`` writes, and
+    ``del Cls.field`` clears the stored value in the active context (a value supplied
+    by name stays)::
+
+        class Cart(metaclass=ContextData):
+            owner: str = "guest"
+            items: list[str] = initializer(lambda ctx: [])
+
+    A default wrapped in ``initializer(fn)`` is called with the Context on first
+    read; any other default is a constant. A field with no default raises
+    ``ContextDataNotSet`` until it is set. Unhashable defaults such as ``[]``
+    raise ``ValueError``. ``ClassVar`` annotations are ordinary class attributes.
+
+    A subclass that redeclares a field shares the base class's value and only
+    changes the default. ``@context_data`` does the same for a class defined without
+    the metaclass.
+    """
+
     def __new__(mcls, name, bases, namespace, **kwds):
         # Annotations are read from the finished class: on 3.14+ the namespace holds
         # a lazy __annotate__ function rather than an __annotations__ dict.
@@ -557,15 +696,19 @@ def context_data(cls: type[T]) -> type[T]:
     Class decorator that sets the metaclass of the decorated class to ContextData.
 
     This allows classes to be defined without explicitly specifying the metaclass,
-    making the API more user-friendly.
+    making the API more user-friendly. See ``ContextData`` for how the annotated
+    attributes behave.
 
-    A default wrapped in initializer() is called with the Context on first read; any
-    other default is a constant. Mutable defaults are rejected, as with dataclasses.
+    A default wrapped in ``initializer()`` is called with the Context on first read;
+    any other default is a constant. Unhashable defaults raise ``ValueError``, as
+    with dataclasses.
 
-    The decorator rebuilds the class, so a base class's __init_subclass__ runs again and
-    class keywords are not carried over; use metaclass=ContextData for those.
+    The decorator rebuilds the class, so a base class's ``__init_subclass__`` runs
+    again and class keywords are not carried over; use ``metaclass=ContextData`` for
+    those.
 
-    Usage:
+    Usage::
+
         @context_data
         class MyData:
             field1: str
