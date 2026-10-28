@@ -11,7 +11,7 @@ from safetydance._steps import Given, StepNotFound
 MODULE = "sd_ep_steps"
 
 STEPS_SOURCE = """\
-from safetydance._steps import step_namespace
+from safetydance import step_namespace
 step = step_namespace("http")
 
 @step

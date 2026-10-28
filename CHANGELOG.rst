@@ -2,6 +2,25 @@
 safetydance Change Log
 ======================
 
+v0.5.0
+====================
+
+**Added:**
+
+* ``Given``, ``When``, ``Then`` and ``And`` look steps up by name. ``@step``
+  and ``step_namespace(...)`` register steps, found by full module path, short
+  namespace or bare name; ``register_steps(...)`` binds steps explicitly and
+  always wins, to settle collisions.
+* Steps modules can be exposed through ``safetydance.steps`` entry points,
+  which are imported lazily on lookup.
+* ``StepNotFound`` and ``AmbiguousStep`` (both ``AttributeError``) report a
+  missing name or one that could mean several steps.
+
+**Changed:**
+
+* ``@step`` is back as an optional registration decorator; it never rewrites
+  functions.
+
 v0.4.0
 ====================
 

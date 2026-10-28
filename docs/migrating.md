@@ -24,7 +24,10 @@ The separate `safetydance-test` package's `scripted_test` corresponds to
 
 ## What to change
 
-1. Remove `@step`. A step is now any function that uses context data.
+1. Drop the 0.3 `@step`, which rewrote functions; that is gone. A step is any
+   function that uses context data. In 0.5, `@step` only registers a plain
+   function so `Given`, `When`, `Then` and `And` can find it, and it is
+   optional.
 2. Replace `step_data` keys with `ContextProperty` objects or `@context_data`
    classes. Use `initializer(...)` for per-context defaults.
 3. Keep `@script` on the flows you run as units.
@@ -57,6 +60,22 @@ def place_order():
 assert place_order() == ["tea"]
 assert place_order() == ["tea"]  # each call has a fresh context
 ```
+
+## From safetydance-test and type_extensions
+
+The `Given`, `When`, `Then` and `And` prefixes now live in `safetydance` (0.5),
+and need neither `safetydance-test` nor `type_extensions`:
+
+| old | new |
+| --- | --- |
+| `from safetydance_test import Given, When, Then, And` | `from safetydance import Given, When, Then, And` |
+| `@scripted_test` | `@test_context` |
+| `step_extension(f, target_type=X)` | `@step` or `step_namespace("x")` in the step module |
+| `all_steps_as_step_extensions_from(module)` | `@step` on the module's steps, or `register_steps(*fns, namespace=...)` |
+| `type_extensions.extension_property` sub-prefixes (`Given.http`) | `step_namespace("http")` |
+| `TestStepPrefix` | `StepPrefix` (no subclassing needed) |
+
+See [testing](testing.md#given-when-then) for how steps are found.
 
 See the [concepts](concepts.md) for the details and the full list of changes
 in the [changelog](https://gitlab.com/dcharbon/safetydance/-/blob/main/CHANGELOG.rst).

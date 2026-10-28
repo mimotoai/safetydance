@@ -6,6 +6,7 @@ from docutils.core import publish_doctree
 
 import safetydance
 import safetydance._safetydance as impl
+import safetydance._steps as steps
 
 
 def _documented_members():
@@ -44,7 +45,7 @@ def test_docstrings_are_valid_rst(name, obj):
 
 
 def test_package_exports_all():
-    assert safetydance.__all__ == impl.__all__
+    assert safetydance.__all__ == [*impl.__all__, *steps.__all__]
 
 
 def test_version_matches_metadata():
