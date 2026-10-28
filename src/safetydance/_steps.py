@@ -94,11 +94,11 @@ class _Registry:
         """Why ``f`` cannot be bound at ``path``, as (reason, other step), or None."""
         taken = self._bindings.get(path, pending.get(path))
         if taken is not None and not _same(f, taken):
-            return f"'{_dotted(path)}' is already bound to {{other}}", taken
+            return f"'{_dotted(path)}' is already bound to", taken
         for i in range(1, len(path)):
             above = self._bindings.get(path[:i], pending.get(path[:i]))
             if above is not None:
-                return f"'{_dotted(path[:i])}' is the step {{other}}", above
+                return f"'{_dotted(path[:i])}' is the step", above
         below = next((p for p in pending if p[: len(path)] == path and p != path), None)
         if below is None and path in self._children:
             below = path
@@ -106,17 +106,18 @@ class _Registry:
                 below += (min(self._children[below]),)
         if below is not None:
             other = self._bindings.get(below, pending.get(below))
-            return f"'{_dotted(path)}' is a namespace holding {{other}}", other
+            return f"'{_dotted(path)}' is a namespace holding", other
         return None
 
     def bind(self, paths_and_steps: list[tuple[_Path, Callable[..., Any]]]) -> None:
         """Bind every step or none of them; raises ``ValueError`` on a conflict."""
         pending: dict[_Path, Any] = {}
-        clash = None
+        bad = None
         with self._lock:
             for path, f in paths_and_steps:
                 clash = self._clash(path, f, pending)
                 if clash:
+                    bad = (path, f, *clash)
                     break
                 pending.setdefault(path, f)
             else:
@@ -125,10 +126,10 @@ class _Registry:
                         self._bindings[path] = f
                         for i in range(len(path)):
                             self._children.setdefault(path[:i], set()).add(path[i])
-        if clash:
-            reason, other = clash
+        if bad:
+            path, f, reason, other = bad
             raise ValueError(
-                f"{reason.format(other=_describe(other))}; cannot register "
+                f"{reason} {_describe(other)}; cannot register "
                 f"{_describe(f)} at '{_dotted(path)}'{_twice_hint(other, f)}"
             )
 
@@ -147,17 +148,13 @@ class _Registry:
                         del self._children[path[:i]]
 
     def resolve(self, path: _Path) -> Any:
-        """The step at ``path``, or a namespace node if it has children."""
+        """The step at ``path``, a namespace node if it has children, else None."""
         with self._lock:
             found = self._bindings.get(path)
             is_namespace = path in self._children
         if found is not None:
             return found
-        if is_namespace:
-            return _StepNamespace(path)
-        raise StepNotFound(
-            f"No step or namespace at '{_dotted(path)}'; import the module that defines it"
-        )
+        return _StepNamespace(path) if is_namespace else None
 
     def children(self, path: _Path) -> list[str]:
         with self._lock:
@@ -177,10 +174,15 @@ def _lookup(owner: object, path: _Path) -> Any:
             name=name,
             obj=owner,
         )
-    try:
-        return _registry.resolve(path)
-    except StepNotFound as e:
-        raise StepNotFound(*e.args, name=name, obj=owner) from None
+    found = _registry.resolve(path)
+    if found is None:
+        raise StepNotFound(
+            f"No step or namespace at '{_dotted(path)}'; "
+            "import the module that defines it",
+            name=name,
+            obj=owner,
+        )
+    return found
 
 
 class StepPrefix:
@@ -216,7 +218,9 @@ class _StepNamespace:
         self.__sd_path__ = path
 
     def __getattr__(self, name: str) -> Any:
-        return _lookup(self, (*self.__sd_path__, name))
+        # Copy and pickle probe _-names before the slot is filled; never read it then.
+        path = () if name.startswith("_") else self.__sd_path__
+        return _lookup(self, (*path, name))
 
     def __dir__(self) -> list[str]:
         return _registry.children(self.__sd_path__)

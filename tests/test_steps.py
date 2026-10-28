@@ -77,15 +77,21 @@ def test_a_different_step_at_a_taken_path_raises():
 
 
 def test_step_at_a_namespace_path_raises():
-    step_namespace("http")(make_step("m", "get"))
-    with pytest.raises(ValueError):
-        step(make_step("m", "http"))
+    inner = make_step("pkg_a", "get")
+    step_namespace("http")(inner)
+    with pytest.raises(ValueError, match=r"pkg_a\.get.*pkg_b\.http"):
+        step(make_step("pkg_b", "http"))
+    assert Given.http.get is inner
+    assert dir(Given) == ["http"]
 
 
 def test_namespace_under_a_step_raises():
-    step(make_step("m", "http"))
-    with pytest.raises(ValueError):
-        step_namespace("http")(make_step("m", "get"))
+    outer = make_step("pkg_a", "http")
+    step(outer)
+    with pytest.raises(ValueError, match=r"pkg_a\.http.*pkg_b\.get"):
+        step_namespace("http")(make_step("pkg_b", "get"))
+    assert Given.http is outer
+    assert dir(Given) == ["http"]
 
 
 def test_unknown_name_raises_step_not_found():
@@ -94,6 +100,8 @@ def test_unknown_name_raises_step_not_found():
     assert isinstance(info.value, AttributeError)
     assert hasattr(Given, "nope") is False
     assert not str(info.value).endswith(".")
+    assert info.value.name == "nope"
+    assert info.value.obj is Given
 
 
 def test_unknown_nested_name_names_the_path():
@@ -109,9 +117,16 @@ def test_underscore_lookups_are_plain_attribute_errors(name):
         with pytest.raises(AttributeError) as info:
             getattr(owner, name)
         assert type(info.value) is AttributeError
+
+
+def test_tooling_can_copy_and_pickle_prefixes_and_namespaces():
+    step_namespace("http")(make_step("m", "get"))
     assert inspect.unwrap(Given) is Given
-    copy.copy(Given)
-    pickle.dumps(Given)
+    assert copy.copy(Given) is not None
+    for node in (Given, Given.http):
+        assert repr(copy.copy(node)) == repr(node)
+        assert repr(copy.deepcopy(node)) == repr(node)
+        assert repr(pickle.loads(pickle.dumps(node))) == repr(node)
 
 
 def test_prefix_rejects_assignment():
