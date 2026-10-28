@@ -1,9 +1,12 @@
 import copy
+import functools
 import inspect
+import sys
+import traceback
 
 import pytest
 
-from safetydance import ContextProperty, NoActiveContext, script
+from safetydance import ContextProperty, NoActiveContext, _safetydance, script
 from safetydance import _steps
 from safetydance._steps import (
     AmbiguousStep,
@@ -365,3 +368,388 @@ def test_step_outside_a_context_raises_no_active_context():
     step(bump)
     with pytest.raises(NoActiveContext):
         Given.bump()
+
+
+# R4: AmbiguousStep and StepNotFound are sibling AttributeErrors.
+
+
+def test_ambiguous_step_is_not_a_step_not_found():
+    assert issubclass(AmbiguousStep, AttributeError)
+    assert not issubclass(AmbiguousStep, StepNotFound)
+    assert not issubclass(StepNotFound, AmbiguousStep)
+    step(make_step("pkg_a.steps", "get"))
+    step(make_step("pkg_b.steps", "get"))
+    with pytest.raises(AmbiguousStep) as err:
+        Given.get
+    assert not isinstance(err.value, StepNotFound)
+    assert hasattr(Given, "get") is False
+    assert getattr(Given, "get", 1) == 1
+
+
+# R5: below the root, only dunder names are refused.
+
+
+def test_single_underscore_segments_below_the_root_resolve():
+    step(make_step("pkg._impl.steps", "get", "impl"))
+    assert Given.pkg._impl.steps.get() == "impl"
+    assert "_impl" in dir(Given.pkg)
+
+
+def test_dunder_segments_are_hidden_from_dir():
+    step(make_step("pkg.__main__", "get"))
+    assert "__main__" not in dir(Given.pkg)
+    with pytest.raises(AttributeError) as err:
+        Given.pkg.__main__
+    assert type(err.value) is AttributeError
+
+
+def test_root_underscore_names_are_hidden_from_dir():
+    step(make_step("_private.steps", "get"))
+    assert "_private" not in dir(Given)
+    with pytest.raises(AttributeError) as err:
+        Given._private
+    assert type(err.value) is AttributeError
+
+
+@pytest.mark.parametrize("module", ["__main__", "_private.steps", "pkg.__main__"])
+def test_ambiguity_never_advises_a_full_path_that_cannot_be_typed(module):
+    step(make_step(module, "http"))
+    step_namespace("http")(make_step("n", "get"))
+    with pytest.raises(AmbiguousStep, match="both a step and a namespace") as err:
+        Given.http
+    message = str(err.value)
+    assert f"{module}.http" not in message
+    assert "step_namespace" in message
+    assert "register_steps(..., namespace=...)" in message
+
+
+def test_ambiguous_name_never_advises_a_full_path_that_cannot_be_typed():
+    step(make_step("__main__", "get"))
+    step(make_step("pkg_b.steps", "get"))
+    with pytest.raises(AmbiguousStep) as err:
+        Given.get
+    assert "full module path" not in str(err.value)
+    assert "step_namespace" in str(err.value)
+
+
+def test_closures_sharing_a_full_path_are_not_advised_it():
+    make_namespaced_step("api", "api")
+    make_namespaced_step("admin", "admin")
+    with pytest.raises(AmbiguousStep) as err:
+        Given.get
+    assert "full module path" not in str(err.value)
+
+
+# R6: an explicit binding cannot share a path with a namespace.
+
+
+def test_register_steps_rejects_a_path_that_is_a_namespace():
+    step_namespace("http")(make_step("pkg_a.steps", "get"))
+    with pytest.raises(ValueError, match=r"'http'.*already a namespace"):
+        register_steps(make_step("m", "http"))
+    assert Given.http.get
+
+
+def test_register_steps_rejects_a_path_under_a_bound_step():
+    register_steps(make_step("m", "http"))
+    for namespace in ["http", "http.v2"]:
+        with pytest.raises(ValueError, match=r"'http' is already registered to m\.http"):
+            register_steps(make_step("pkg_a.steps", "get"), namespace=namespace)
+    assert Given.http() is None
+
+
+def test_explicit_step_that_gains_children_is_ambiguous():
+    register_steps(make_step("m", "http"))
+    step_namespace("http")(make_step("pkg_a.steps", "get"))
+    with pytest.raises(AmbiguousStep, match=r"'http' is both a step and a namespace.*m\.http") as err:
+        Given.http
+    assert not str(err.value).endswith(".")
+
+
+# R7: what counts as the same step.
+
+
+def fetch():
+    return "fetched"
+
+
+def labelled(label):
+    def decorate(f):
+        @functools.wraps(f)
+        def wrapper(*args, **kwargs):
+            return label, f(*args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
+def shouting(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        return f(*args, **kwargs).upper()
+
+    return wrapper
+
+
+def test_wrappers_capturing_different_values_are_distinct_steps():
+    step(labelled("a")(fetch))
+    step(labelled("b")(fetch))
+    with pytest.raises(AmbiguousStep):
+        Given.fetch
+
+
+def test_different_wrappers_around_one_function_are_distinct_steps():
+    step(labelled("a")(fetch))
+    step(shouting(fetch))
+    with pytest.raises(AmbiguousStep):
+        Given.fetch
+
+
+def test_wrapper_and_the_function_it_wraps_are_distinct_steps():
+    step(fetch)
+    step(shouting(fetch))
+    with pytest.raises(AmbiguousStep):
+        Given.fetch
+
+
+def equal_values():
+    """Two equal strings that are distinct objects, as two imports would make."""
+    a, b = "".join(["label", "-a"]), "".join(["label", "-a"])
+    assert a == b and a is not b
+    return a, b
+
+
+def test_equal_wrappers_around_one_function_are_one_step():
+    # Two wrapper objects, made alike, as a module imported twice would make them.
+    a, b = equal_values()
+    step(labelled(a)(fetch))
+    step(labelled(b)(fetch))
+    assert Given.fetch() == ("label-a", "fetched")
+
+
+def make_default_step(value):
+    def get(result=value):
+        return result
+
+    return get
+
+
+def make_kwdefault_step(value):
+    def get(*, result=value):
+        return result
+
+    return get
+
+
+@pytest.mark.parametrize("factory", [make_default_step, make_kwdefault_step])
+def test_same_code_with_different_defaults_is_distinct_steps(factory):
+    step_namespace("api")(factory("api"))
+    step_namespace("admin")(factory("admin"))
+    assert Given.api.get() == "api"
+    assert Given.admin.get() == "admin"
+    with pytest.raises(AmbiguousStep):
+        Given.get
+
+
+@pytest.mark.parametrize("factory", [make_default_step, make_kwdefault_step])
+def test_same_code_with_equal_defaults_is_one_step(factory):
+    a, b = equal_values()
+    step(factory(a))
+    step(factory(b))
+    assert Given.get() == "label-a"
+
+
+def test_unhashable_defaults_are_compared_by_identity():
+    shared = []
+    step(make_default_step(shared))
+    step(make_default_step(shared))
+    assert Given.get() is shared
+    step(make_default_step([]))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+
+
+def test_closures_capturing_equal_values_are_one_step():
+    a, b = equal_values()
+    make_namespaced_step("api", a)
+    make_namespaced_step("admin", b)
+    assert Given.get() == "label-a"
+    # One step: the later registration replaced the stored object at the bare name.
+    assert Given.get is Given.admin.get
+
+
+def test_closures_capturing_unhashable_values_are_compared_by_identity():
+    shared = []
+    make_namespaced_step("api", shared)
+    make_namespaced_step("admin", shared)
+    assert Given.get() is shared
+    make_namespaced_step("other", [])
+    with pytest.raises(AmbiguousStep):
+        Given.get
+
+
+def test_double_imported_module_with_defaults_is_one_step():
+    # Each compile makes its own float and tuple constants: equal, not identical.
+    source = "def get(result=2.5, *, flag=(1, 'two')):\n    return result\n"
+    for module in ["example.steps", "tests.example.steps"]:
+        namespace = {"__name__": module}
+        exec(compile(source, "/src/example/steps.py", "exec"), namespace)
+        step_namespace("http")(namespace["get"])
+    assert Given.get() == 2.5
+    assert Given.http.get() == 2.5
+
+
+def test_exec_d_steps_with_one_pseudo_file_in_different_modules_are_distinct():
+    # "<string>" names no file, so the same code there in two modules is two steps.
+    step(make_step("pkg_a.steps", "get", "same", filename="<string>"))
+    step(make_step("pkg_b.steps", "get", "same", filename="<string>"))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    assert Given.pkg_a.steps.get() == "same"
+
+
+def test_different_code_at_one_location_is_distinct_steps():
+    step(make_step("m", "get", "a", filename="<string>"))
+    step(make_step("m", "get", "b", filename="<string>"))
+    with pytest.raises(AmbiguousStep):
+        Given.m.get
+
+
+def test_cyclic_wrapped_chain_is_registered():
+    def ping():
+        return "ping"
+
+    def pong():
+        return "pong"
+
+    ping.__wrapped__ = pong
+    pong.__wrapped__ = ping
+    with pytest.raises(ValueError):
+        inspect.unwrap(ping)
+    step(ping)
+    step(ping)
+    assert Given.ping() == "ping"
+
+
+def test_recursive_closure_is_registered():
+    def factory():
+        def countdown(n=0):
+            return n if n <= 0 else countdown(n - 1)
+
+        return countdown
+
+    step(factory())
+    step(factory())
+    assert Given.countdown(3) == 0
+
+
+class Fetcher:
+    def __init__(self, result):
+        self.__name__ = "fetcher"
+        self.result = result
+
+    def __call__(self):
+        return self.result
+
+
+def test_callable_instances_are_keyed_by_identity():
+    a = Fetcher("a")
+    step(a)
+    step(a)
+    assert Given.fetcher() == "a"
+    step(Fetcher("a"))
+    with pytest.raises(AmbiguousStep):
+        Given.fetcher
+
+
+def test_partial_is_rejected_for_lacking_a_name():
+    with pytest.raises(TypeError, match="__name__"):
+        step(functools.partial(fetch))
+    with pytest.raises(TypeError, match="__name__"):
+        register_steps(functools.partial(fetch))
+
+
+def test_lambda_is_rejected_for_its_name():
+    with pytest.raises(ValueError, match="<lambda>"):
+        step(lambda: None)
+    with pytest.raises(ValueError, match="<lambda>"):
+        register_steps(lambda: None)
+
+
+# R9: StepPrefix has no attributes of its own.
+
+
+def test_attributes_cannot_be_set_on_a_prefix():
+    with pytest.raises(AttributeError):
+        Given.x = 1
+    with pytest.raises(StepNotFound):
+        Given.x
+
+
+def test_prefix_repr():
+    assert repr(Given) == "<step prefix>"
+
+
+# R10: errors carry name and obj, so Python can suggest a close name.
+
+
+def test_step_not_found_carries_name_and_obj(registry):
+    step_namespace("http")(make_step("pkg_a.steps", "get"))
+    with pytest.raises(StepNotFound) as err:
+        Given.gett
+    assert (err.value.name, err.value.obj) == ("gett", Given)
+    namespace = Given.http
+    with pytest.raises(StepNotFound) as err:
+        namespace.gett
+    assert err.value.name == "gett"
+    assert err.value.obj is namespace
+    # Python fills these in for attribute syntax anyway; the registry sets them itself.
+    with pytest.raises(StepNotFound) as err:
+        registry.resolve(("http", "gett"), namespace)
+    assert err.value.name == "gett"
+    assert err.value.obj is namespace
+
+
+def test_ambiguous_step_carries_name_and_obj(registry):
+    step(make_step("pkg_a.steps", "get"))
+    step(make_step("pkg_b.steps", "get"))
+    with pytest.raises(AmbiguousStep) as err:
+        registry.resolve(("get",), Given)
+    assert (err.value.name, err.value.obj) == ("get", Given)
+    assert not str(err.value).endswith(".")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="traceback suggests names from 3.12")
+def test_missing_step_suggests_a_close_name():
+    step(make_step("pkg_a.steps", "fetch"))
+    with pytest.raises(StepNotFound) as err:
+        Given.pkg_a.steps.fetchh
+    (line,) = traceback.format_exception_only(err.value)
+    assert line.rstrip().endswith("entry point. Did you mean: 'fetch'?")
+
+
+# R11: small fixes.
+
+
+def test_all_is_sorted_like_safetydance():
+    assert _safetydance.__all__ == sorted(_safetydance.__all__)
+    assert _steps.__all__ == sorted(_steps.__all__)
+
+
+def test_register_steps_needs_a_step():
+    with pytest.raises(TypeError, match="at least one step"):
+        register_steps()
+    with pytest.raises(TypeError):
+        register_steps(namespace="x")
+
+
+def test_full_path_is_advised_when_it_does_not_pass_through_the_name():
+    # x.get is a step (namespace "x") and a namespace (module x.get); the step's
+    # full path x.y.get shares the root x but not the ambiguous x.get.
+    step_namespace("x")(make_step("x.y", "get", "xy"))
+    step(make_step("x.get", "other"))
+    with pytest.raises(AmbiguousStep, match=r"full module path, x\.y\.get") as err:
+        Given.x.get
+    assert "step_namespace" not in str(err.value)
+    assert Given.x.y.get() == "xy"

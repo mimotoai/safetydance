@@ -1,12 +1,13 @@
 import keyword
 import threading
 from importlib.metadata import entry_points
-from inspect import ismethod, unwrap
+from inspect import ismethod
+from types import CodeType, FunctionType
 from typing import Any, Callable, Iterable, TypeVar
 
 __all__ = [
-    "And",
     "AmbiguousStep",
+    "And",
     "Given",
     "StepNotFound",
     "StepPrefix",
@@ -31,12 +32,13 @@ class StepNotFound(AttributeError):
     """
     Raised when no step is registered at the name looked up on a prefix.
 
-    It is an ``AttributeError``, so ``hasattr(Given, name)`` and
-    ``getattr(Given, name, default)`` work.
+    It is an ``AttributeError``, so ``hasattr(Given, name)`` is false and
+    ``getattr(Given, name, default)`` returns ``default``. ``AmbiguousStep`` is a
+    separate ``AttributeError``, not a kind of ``StepNotFound``.
     """
 
 
-class AmbiguousStep(StepNotFound):
+class AmbiguousStep(AttributeError):
     """
     Raised when a name looked up on a prefix could mean more than one thing.
 
@@ -44,6 +46,9 @@ class AmbiguousStep(StepNotFound):
     a namespace. A step's full module path is unique, except for steps made by one
     factory (closures) and bound methods: give those an explicit registration with
     ``register_steps``, or a short namespace.
+
+    It is an ``AttributeError`` but not a ``StepNotFound``, so ``hasattr`` and
+    ``getattr(Given, name, default)`` treat an ambiguous name as absent too.
     """
 
 
@@ -54,6 +59,10 @@ def _installed_entry_points() -> Iterable[Any]:
 
 def _is_segment(name: str) -> bool:
     return name.isidentifier() and not keyword.iskeyword(name) and not name.startswith("_")
+
+
+def _is_dunder(name: str) -> bool:
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
 
 
 def _namespace_path(namespace: str) -> _Path:
@@ -78,37 +87,102 @@ def _step_name(f: Callable[..., Any]) -> str:
     return name
 
 
+def _layers(f: Callable[..., Any]) -> list[Any]:
+    """``f`` and each object it wraps through ``__wrapped__``, stopping at a cycle."""
+    # The list keeps every layer alive, so an identity check cannot see a reused id.
+    layers: list[Any] = []
+    layer: Any = f
+    while layer is not None and not any(layer is seen for seen in layers):
+        layers.append(layer)
+        layer = getattr(layer, "__wrapped__", None)
+    return layers
+
+
+def _function_key(f: Any, active: frozenset[int]) -> _Key:
+    if id(f) in active:
+        # A function that captures itself, as a recursive closure does.
+        return ("<cycle>",)
+    active = active | {id(f)}
+    code: CodeType = f.__code__
+    # A pseudo-file such as "<string>" does not identify the source, so the module
+    # tells apart code exec'd in different modules.
+    module = getattr(f, "__module__", None) if code.co_filename.startswith("<") else None
+    kwdefaults = getattr(f, "__kwdefaults__", None) or {}
+    cells = []
+    for cell in getattr(f, "__closure__", None) or ():
+        try:
+            contents = cell.cell_contents
+        except ValueError:
+            cells.append(("<empty>",))
+        else:
+            cells.append(_value_key(contents, active))
+    return (
+        code.co_filename,
+        code.co_firstlineno,
+        getattr(f, "__qualname__", None),
+        # Code compares by value, so different code at one location stays distinct.
+        code,
+        module,
+        tuple(_value_key(v, active) for v in getattr(f, "__defaults__", None) or ()),
+        tuple((name, _value_key(v, active)) for name, v in sorted(kwdefaults.items())),
+        tuple(cells),
+    )
+
+
+def _value_key(value: Any, active: frozenset[int]) -> Any:
+    # By value where possible, so a module imported twice gives equal keys.
+    if ismethod(value):
+        return ("<method>", id(value.__self__), _value_key(value.__func__, active))
+    if isinstance(value, FunctionType):
+        return _function_key(value, active)
+    try:
+        hash(value)
+    except Exception:
+        return ("<id>", id(value))
+    return (type(value), value)
+
+
+def _layer_key(layer: Any) -> _Key:
+    if ismethod(layer):
+        # A bound method forwards __code__, so methods of different instances share it.
+        return ("<method>", id(layer.__self__), _layer_key(layer.__func__))
+    if isinstance(getattr(layer, "__code__", None), CodeType):
+        return _function_key(layer, frozenset())
+    return ("<object>", id(layer))
+
+
 def _step_key(f: Callable[..., Any]) -> _Key:
-    # Keyed by where the code is defined, not by object identity, so one module
-    # imported under two names (e.g. through pytest's rootdir) is one step.
-    target = unwrap(f)
-    qualname = getattr(target, "__qualname__", None)
-    code = getattr(target, "__code__", None)
-    if code is None:
-        return ("<object>", id(f), qualname)
-    key: _Key = (code.co_filename, code.co_firstlineno, qualname)
-    # A bound method forwards __code__, so methods of different instances share it.
-    method = next((m for m in (target, f) if ismethod(m)), None)
-    if method is not None:
-        key = (*key, id(method.__self__))
-    # Closures from one factory share their code but may capture different values.
-    # A bound method is made afresh on each attribute access, so key its function.
-    if getattr(target, "__closure__", None):
-        return (*key, id(f if method is None else method.__func__))
-    return key
+    # Keyed by code, defaults and captured values rather than object identity, so
+    # one module imported under two names (e.g. through pytest's rootdir) is one
+    # step. Every wrapper in a functools.wraps chain counts.
+    return tuple(_layer_key(layer) for layer in _layers(f))
+
+
+def _full_path(f: Callable[..., Any]) -> _Path:
+    return (*f.__module__.split("."), f.__name__)
 
 
 def _full_name(f: Callable[..., Any]) -> str:
     return f"{f.__module__}.{f.__name__}"
 
 
+def _reachable(path: _Path) -> bool:
+    """Whether ``path`` can be typed as attribute lookups on a prefix."""
+    return not path[0].startswith("_") and not any(_is_dunder(s) for s in path)
+
+
+def _advisable(full: _Path, path: _Path) -> bool:
+    # A full module path through the path being looked up is just as ambiguous.
+    return _reachable(full) and full[: len(path)] != path
+
+
 def _candidate_names(steps: list[Callable[..., Any]]) -> list[str]:
     names = [_full_name(f) for f in steps]
     labels = []
     for name, f in zip(names, steps):
-        code = getattr(unwrap(f), "__code__", None)
+        code = getattr(_layers(f)[-1], "__code__", None)
         # A full name alone cannot tell apart candidates that share it.
-        if code is not None and names.count(name) > 1:
+        if isinstance(code, CodeType) and names.count(name) > 1:
             name = f"{name} ({code.co_filename}:{code.co_firstlineno})"
         labels.append(name)
     return sorted(labels)
@@ -165,7 +239,7 @@ class _Registry:
     def add_default(self, f: Callable[..., Any], namespace: _Path | None) -> None:
         name = _step_name(f)
         key = _step_key(f)
-        paths = [(*f.__module__.split("."), name), (name,)]
+        paths = [_full_path(f), (name,)]
         if namespace is not None:
             paths.append((*namespace, name))
         with self._lock:
@@ -177,9 +251,6 @@ class _Registry:
                 registered[key] = f
                 self._add_prefixes(path)
 
-    def add_explicit(self, f: Callable[..., Any], namespace: _Path) -> None:
-        self.add_explicit_all([f], namespace)
-
     def add_explicit_all(self, steps: list[Callable[..., Any]], namespace: _Path) -> None:
         bindings: dict[_Path, list[tuple[_Key, Callable[..., Any]]]] = {}
         for f in steps:
@@ -188,19 +259,32 @@ class _Registry:
         with self._lock:
             # Check every conflict before binding anything, so a failure binds nothing.
             for path, items in bindings.items():
-                first = self._explicit.get(path) or items[0]
-                for key, f in items:
-                    if key != first[0]:
-                        raise ValueError(
-                            f"'{_dotted(path)}' is already registered to "
-                            f"{_full_name(first[1])}; cannot also register "
-                            f"{_full_name(f)} there."
-                        )
+                self._check_explicit(path, items)
             for path, items in bindings.items():
                 if path not in self._explicit:
                     self._record("explicit", path, items[-1][0])
                 self._explicit[path] = items[-1]
                 self._add_prefixes(path)
+
+    def _check_explicit(self, path: _Path, items: list[tuple[_Key, Callable[..., Any]]]) -> None:
+        where = f"Cannot register {_full_name(items[0][1])} at '{_dotted(path)}'"
+        if path in self._children:
+            raise ValueError(f"{where}: it is already a namespace of other steps.")
+        for i in range(1, len(path)):
+            bound = self._explicit.get(path[:i])
+            if bound is not None:
+                raise ValueError(
+                    f"{where}: '{_dotted(path[:i])}' is already registered to "
+                    f"{_full_name(bound[1])}."
+                )
+        first = self._explicit.get(path) or items[0]
+        for key, f in items:
+            if key != first[0]:
+                raise ValueError(
+                    f"'{_dotted(path)}' is already registered to "
+                    f"{_full_name(first[1])}; cannot also register "
+                    f"{_full_name(f)} there."
+                )
 
     def _roll_back(self, records: list[_Record]) -> None:
         with self._lock:
@@ -261,57 +345,85 @@ class _Registry:
                 # Only once load() returns, so a failed load raises again next time.
                 self._unloaded = [p for p in self._unloaded if p is not ep]
 
-    def resolve(self, path: _Path) -> Any:
+    def resolve(self, path: _Path, node: object) -> Any:
         self._load_entry_points()
-        return self._resolve(path)
-
-    def _resolve(self, path: _Path) -> Any:
         with self._lock:
             explicit = self._explicit.get(path)
             defaults = list(self._default.get(path, {}).values())
             is_namespace = path in self._children
+        if explicit is not None and is_namespace:
+            raise _lookup_error(
+                AmbiguousStep,
+                f"'{_dotted(path)}' is both a step and a namespace; register_steps "
+                f"bound {_full_name(explicit[1])} there, so bind it under a namespace "
+                "of its own with register_steps(..., namespace=...) instead",
+                path,
+                node,
+            )
         if explicit is not None:
             return explicit[1]
         if len(defaults) > 1:
             candidates = ", ".join(_candidate_names(defaults))
-            raise AmbiguousStep(
+            full_paths = {_full_path(f) for f in defaults}
+            if len(full_paths) == len(defaults) and all(
+                _advisable(full, path) for full in full_paths
+            ):
+                hint = "Use the full module path, a short namespace, or"
+            else:
+                hint = "Give each a short namespace with step_namespace, or use"
+            raise _lookup_error(
+                AmbiguousStep,
                 f"Step '{_dotted(path)}' is ambiguous; it could be any of: {candidates}. "
-                "Use the full module path, a short namespace, or "
-                "register_steps(..., namespace=...) to choose one."
+                f"{hint} register_steps(..., namespace=...) to choose one",
+                path,
+                node,
             )
         if defaults and is_namespace:
             found = defaults[0]
-            # A full module path that starts at this same root is just as ambiguous.
-            if found.__module__.split(".")[0] == path[0]:
+            if _advisable(_full_path(found), path):
+                hint = f"use the step's full module path, {_full_name(found)}, to call it"
+            else:
                 hint = (
                     "give the step a short namespace with step_namespace, or bind it "
-                    "with register_steps(..., namespace=...)."
+                    "with register_steps(..., namespace=...)"
                 )
-            else:
-                hint = f"use the step's full module path, {_full_name(found)}, to call it."
-            raise AmbiguousStep(f"'{_dotted(path)}' is both a step and a namespace; {hint}")
+            raise _lookup_error(
+                AmbiguousStep, f"'{_dotted(path)}' is both a step and a namespace; {hint}", path, node
+            )
         if defaults:
             return defaults[0]
         if is_namespace:
             return _StepNamespace(path)
-        raise StepNotFound(
+        raise _lookup_error(
+            StepNotFound,
             f"No step named '{_dotted(path)}'. Steps are found only once their module "
-            # No final period: Python may append ". Did you mean ...?".
-            f"is imported or exposed through a {ENTRY_POINT_GROUP!r} entry point"
+            f"is imported or exposed through a {ENTRY_POINT_GROUP!r} entry point",
+            path,
+            node,
         )
 
     def child_names(self, path: _Path) -> list[str]:
         with self._lock:
             names = self._children.get(path, set())
-            # Full module paths can include names like __main__ that no lookup reaches.
-            return sorted(name for name in names if not name.startswith("_"))
+            # Only names a lookup can reach: the root refuses every name starting
+            # with "_", a namespace only dunders (full module paths have __main__).
+            if not path:
+                return sorted(name for name in names if not name.startswith("_"))
+            return sorted(name for name in names if not _is_dunder(name))
 
-    def root_names(self) -> list[str]:
-        return self.child_names(())
+
+def _lookup_error(
+    cls: type[AttributeError], message: str, path: _Path, node: object
+) -> AttributeError:
+    # name and obj let Python add "Did you mean ...?"; it appends that after a
+    # period, so no message ends with one.
+    return cls(message, name=path[-1], obj=node)
 
 
 def _no_attribute(obj: object, name: str) -> AttributeError:
-    return AttributeError(f"{type(obj).__name__!r} object has no attribute {name!r}")
+    return AttributeError(
+        f"{type(obj).__name__!r} object has no attribute {name!r}", name=name, obj=obj
+    )
 
 
 class StepPrefix:
@@ -327,21 +439,30 @@ class StepPrefix:
     A missing name raises ``StepNotFound``; a name that could mean more than one
     step raises ``AmbiguousStep``. The full module path is unique, except for steps
     made by one factory (closures) and bound methods, which need an explicit
-    registration with ``register_steps`` or a short namespace. Names starting with
-    ``_`` are never steps and raise a plain ``AttributeError``. The first lookup
+    registration with ``register_steps`` or a short namespace. The first lookup
     imports every module exposed through a ``safetydance.steps`` entry point. The
     step returned is the registered function itself, so it runs in whatever context
     is active where it is called.
+
+    Names starting with ``_`` are never looked up on a prefix and raise a plain
+    ``AttributeError``. Below the prefix only dunder names are refused, so a full
+    module path such as ``Given.my_package._impl.steps.get`` works. Attributes
+    cannot be set on a prefix.
     """
+
+    __slots__ = ()
 
     def __getattr__(self, name: str) -> Any:
         # Tooling (pytest, mock, copy, inspect) probes dunder names; keep those cheap.
         if name.startswith("_"):
             raise _no_attribute(self, name)
-        return _registry.resolve((name,))
+        return _registry.resolve((name,), self)
 
     def __dir__(self) -> list[str]:
-        return _registry.root_names()
+        return _registry.child_names(())
+
+    def __repr__(self) -> str:
+        return "<step prefix>"
 
 
 class _StepNamespace:
@@ -352,9 +473,10 @@ class _StepNamespace:
         self._path = path
 
     def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
+        # A module path may have single-underscore segments, like _impl.
+        if _is_dunder(name):
             raise _no_attribute(self, name)
-        return _registry.resolve((*self._path, name))
+        return _registry.resolve((*self._path, name), self)
 
     def __dir__(self) -> list[str]:
         return _registry.child_names(self._path)
@@ -369,8 +491,14 @@ def step(f: F) -> F:
 
     The step is found by its bare name and by its full module path, for example
     ``Given.get`` and ``Given.my_package.steps.get``. To add a short namespace as
-    well, use ``step_namespace``. Raises ``ValueError`` if the name starts with
-    ``_``.
+    well, use ``step_namespace``. Raises ``ValueError`` if the name is a keyword,
+    is not an identifier or starts with ``_``.
+
+    Registering the same step again replaces it rather than making its names
+    ambiguous, so a module imported under two names is harmless. Two steps are the
+    same when they have the same code, defaults and captured values, through every
+    wrapper of a ``functools.wraps`` chain, and, for bound methods, the same
+    instance.
     """
     _registry.add_default(f, None)
     return f
@@ -399,6 +527,12 @@ def step_namespace(namespace: str) -> Callable[[F], F]:
     return register
 
 
+def _check_callables(steps: tuple[Callable[..., object], ...]) -> None:
+    for f in steps:
+        if not callable(f):
+            raise TypeError(f"A step must be callable; got {f!r}.")
+
+
 def register_steps(*steps: Callable[..., object], namespace: str | None = None) -> None:
     """
     Bind ``steps`` explicitly, ahead of every step registered with ``step``.
@@ -411,15 +545,17 @@ def register_steps(*steps: Callable[..., object], namespace: str | None = None) 
 
         Given.other.get("/x")
 
-    The steps need not have been decorated with ``step``. Raises ``TypeError`` for
-    something that is not a named callable, and ``ValueError`` for an invalid
-    namespace, a name starting with ``_``, or a different step already bound at the
-    same path. Every argument is checked first, so a failed call registers nothing.
+    The steps need not have been decorated with ``step``. Raises ``TypeError`` when
+    no step is given, or for something that is not a named callable. Raises
+    ``ValueError`` for an invalid namespace or step name, a different step already
+    bound at the same path, a path that is already a namespace of other steps, or a
+    path under one already bound to a step. Every argument is checked first, so a
+    failed call registers nothing.
     """
+    if not steps:
+        raise TypeError("register_steps() needs at least one step.")
     path = () if namespace is None else _namespace_path(namespace)
-    for f in steps:
-        if not callable(f):
-            raise TypeError(f"A step must be callable; got {f!r}.")
+    _check_callables(steps)
     _registry.add_explicit_all(list(steps), path)
 
 
