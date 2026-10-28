@@ -1,8 +1,10 @@
 import copy
 import functools
+import importlib
 import inspect
 import sys
 import traceback
+import types
 
 import pytest
 
@@ -834,38 +836,8 @@ def test_full_path_is_advised_when_it_does_not_pass_through_the_name():
     assert Given.x.y.get() == "xy"
 
 
-# Review fixes: identity of values a double import duplicates.
-
-DOUBLE_IMPORT_SOURCE = """\
-_MISSING = object()
-
-
-class Client:
-    pass
-
-
-client = Client()
-
-
-def make():
-    captured = client
-
-    def fetch():
-        return captured
-
-    return fetch
-
-
-def get(data=_MISSING):
-    return "get"
-
-
-def post(cls=Client):
-    return "post"
-
-
-fetch = make()
-"""
+# Review fixes: identity of values a double import duplicates. Telling two steps
+# apart wrongly is loud (AmbiguousStep); merging them wrongly is silent.
 
 
 def import_twice(source, filename="/src/example/steps.py"):
@@ -878,36 +850,280 @@ def import_twice(source, filename="/src/example/steps.py"):
     return copies
 
 
-@pytest.mark.parametrize("name", ["get", "post", "fetch"])
-def test_double_import_dedupes_identity_values(name):
-    # A sentinel default, a class default and a captured module-level instance:
-    # each import has its own object, bound to the same global name.
-    first, second = import_twice(DOUBLE_IMPORT_SOURCE)
-    assert first[name] is not second[name]
-    step_namespace("http")(first[name])
-    step_namespace("http")(second[name])
-    assert getattr(Given, name) is second[name]
-    assert getattr(Given.http, name) is second[name]
+@pytest.fixture
+def double_import(tmp_path, monkeypatch):
+    """Import one real file as sd_dbl.steps and as sd_proj.sd_dbl.steps."""
+    package = tmp_path / "sd_proj" / "sd_dbl"
+    package.mkdir(parents=True)
+    (tmp_path / "sd_proj" / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("")
+    monkeypatch.syspath_prepend(tmp_path)
+    monkeypatch.syspath_prepend(tmp_path / "sd_proj")
+    names = ["sd_dbl", "sd_dbl.steps", "sd_proj", "sd_proj.sd_dbl", "sd_proj.sd_dbl.steps"]
+
+    def import_both(source):
+        (package / "steps.py").write_text(source)
+        importlib.invalidate_caches()
+        first = importlib.import_module("sd_dbl.steps")
+        second = importlib.import_module("sd_proj.sd_dbl.steps")
+        assert first is not second and first.__file__ == second.__file__
+        return first, second
+
+    yield import_both
+    for name in names:
+        sys.modules.pop(name, None)
 
 
 @pytest.mark.parametrize(
-    "body",
-    # With no method, the class shares the step's module, so the step's file is
-    # its file. With a method and a module that is not imported, the method's file.
-    ["pass", "__module__ = 'not_imported'\n    def ping(self):\n        return 1"],
+    "definition",
+    [
+        "class Kind:\n    pass\n",
+        # Generated methods (namedtuple, dataclass) have a "<string>" file of their
+        # own; the class is keyed by its module's file, not theirs.
+        "from collections import namedtuple\nKind = namedtuple('Kind', 'x y')\n",
+        "from dataclasses import dataclass\n@dataclass\nclass Kind:\n    x: int = 1\n",
+        "from typing import NamedTuple\nclass Kind(NamedTuple):\n    x: int\n",
+        "import enum\nclass Kind(enum.Enum):\n    A = 1\n",
+    ],
 )
-def test_double_import_dedupes_a_class_default_not_bound_to_a_global(body):
-    # Keyed by where the class is defined, though no global names it.
-    source = (
-        f"class Client:\n    {body}\n"
-        "def post(cls=Client):\n"
-        "    return cls\n"
-        "del Client\n"
+def test_double_import_dedupes_a_class_default(double_import, definition):
+    first, second = double_import(
+        definition + "def get(kind=Kind):\n    return kind\n"
     )
-    first, second = import_twice(source)
-    step(first["post"])
-    step(second["post"])
-    assert Given.post is second["post"]
+    assert first.Kind is not second.Kind
+    step_namespace("http")(first.get)
+    step_namespace("http")(second.get)
+    assert Given.get is second.get
+    assert Given.http.get is second.get
+
+
+def test_double_import_dedupes_module_level_function_values(double_import):
+    first, second = double_import(
+        "_MISSING = object()\n"
+        "def helper(x=_MISSING):\n"
+        "    return x\n"
+        "def get(h=helper):\n"
+        "    return h\n"
+        "def make():\n"
+        "    h = helper\n"
+        "    def fetch():\n"
+        "        return h\n"
+        "    return fetch\n"
+        "fetch = make()\n"
+    )
+    for module in [first, second]:
+        step(module.get)
+        step(module.fetch)
+    # Keyed by name, so the helper's own sentinel default does not matter.
+    assert Given.get is second.get
+    assert Given.fetch is second.fetch
+
+
+def test_module_level_function_value_falls_back_to_its_code_file():
+    # Not in sys.modules, so no module file: co_filename is the same for both.
+    first, second = import_twice("def helper():\n    pass\ndef get(h=helper):\n    return h\n")
+    step(first["get"])
+    step(second["get"])
+    assert Given.get is second["get"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "_MISSING = object()\ndef get(data=_MISSING):\n    return data\n",
+        "class Client:\n    pass\nclient = Client()\n"
+        "def make():\n    c = client\n    def get():\n        return c\n    return get\n"
+        "get = make()\n",
+    ],
+    ids=["sentinel default", "captured instance"],
+)
+def test_double_import_with_an_identity_value_is_ambiguous(double_import, source):
+    # Each import has its own object, so the copies are told apart: loudly.
+    first, second = double_import(source)
+    step(first.get)
+    step(second.get)
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    assert Given.sd_dbl.steps.get is first.get
+    assert Given.sd_proj.sd_dbl.steps.get is second.get
+
+
+def test_captured_lambdas_are_distinct_steps():
+    def make(transform):
+        def get(x):
+            return transform(x)
+
+        return get
+
+    upper = step_namespace("upper")(make(lambda s: s.upper()))
+    step_namespace("lower")(make(lambda s: s.lower()))
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    assert Given.upper.get("Ab") == "AB"
+    assert Given.lower.get("Ab") == "ab"
+    unregister_steps(upper)
+    assert Given.get("Ab") == "ab"
+
+
+def test_captured_module_level_lambdas_are_distinct_steps():
+    # Module-level lambdas share the qualname "<lambda>", so a name cannot tell
+    # them apart; they are keyed by their code instead.
+    namespace = {"__name__": "pkg_a.steps"}
+    source = (
+        "from safetydance._steps import step_namespace\n"
+        "UPPER = lambda s: s.upper()\n"
+        "LOWER = lambda s: s.lower()\n"
+        "def make(transform):\n"
+        "    def get(x):\n"
+        "        return transform(x)\n"
+        "    return get\n"
+        "step_namespace('upper')(make(UPPER))\n"
+        "step_namespace('lower')(make(LOWER))\n"
+    )
+    exec(compile(source, "/src/pkg_a/steps.py", "exec"), namespace)
+    with pytest.raises(AmbiguousStep):
+        Given.get
+    assert Given.lower.get("Ab") == "ab"
+
+
+def test_classes_from_modules_with_a_pseudo_file_are_distinct(monkeypatch):
+    # "<generated>" names no file, so same-named classes from two such modules
+    # are keyed by identity, not merged.
+    def make(cls):
+        def build():
+            return cls
+
+        return build
+
+    for name in ["sd_generated_a", "sd_generated_b"]:
+        module = types.ModuleType(name)
+        module.__file__ = "<generated>"
+        exec("class Kind:\n    pass\n", module.__dict__)
+        monkeypatch.setitem(sys.modules, name, module)
+        step_namespace(name)(make(module.Kind))
+    with pytest.raises(AmbiguousStep):
+        Given.build
+
+
+def status_is(code):
+    def check(response):
+        return response == code
+
+    return check
+
+
+def test_captured_factory_closures_are_distinct_steps():
+    def make(check):
+        def then_ok(response):
+            return check(response)
+
+        return then_ok
+
+    ok = step_namespace("ok")(make(status_is(200)))
+    step_namespace("created")(make(status_is(201)))
+    with pytest.raises(AmbiguousStep):
+        Given.then_ok
+    unregister_steps(ok)
+    assert Given.created.then_ok(201) is True
+    with pytest.raises(StepNotFound):
+        Given.ok
+
+
+LOOP_SOURCE = """\
+import enum
+from safetydance._steps import step_namespace
+
+
+class Method(enum.Enum):
+    GET = "GET"
+    POST = "POST"
+
+
+def make(method):
+    def send():
+        return method
+
+    return send
+
+
+for method in Method:
+    step_namespace(method.name.lower())(make(method))
+"""
+
+
+def test_closures_made_in_a_module_level_loop_are_distinct_steps():
+    # The loop variable is one global bound to each member in turn.
+    namespace = {"__name__": "pkg_a.steps"}
+    exec(compile(LOOP_SOURCE, "/src/pkg_a/steps.py", "exec"), namespace)
+    with pytest.raises(AmbiguousStep):
+        Given.send
+    unregister_steps(Given.post.send)
+    assert Given.get.send() is namespace["Method"].GET
+    assert Given.send() is namespace["Method"].GET
+
+
+def test_rebinding_a_global_does_not_change_a_steps_key():
+    namespace = {"__name__": "pkg_a.steps"}
+    source = (
+        "TOKEN = object()\n"
+        "def make():\n"
+        "    token = TOKEN\n"
+        "    def get():\n"
+        "        return token\n"
+        "    return get\n"
+        "get = make()\n"
+    )
+    exec(compile(source, "/src/pkg_a/steps.py", "exec"), namespace)
+    step(namespace["get"])
+    namespace["TOKEN"] = object()
+    unregister_steps(namespace["get"])
+    with pytest.raises(StepNotFound):
+        Given.get
+
+
+def test_factory_made_classes_are_distinct_steps():
+    def factory(n):
+        class Impl:
+            value = n
+
+        return Impl
+
+    def make(cls):
+        def build():
+            return cls.value
+
+        return build
+
+    step_namespace("a")(make(factory(1)))
+    step_namespace("b")(make(factory(2)))
+    with pytest.raises(AmbiguousStep):
+        Given.build
+    assert (Given.a.build(), Given.b.build()) == (1, 2)
+
+
+class Lazy:
+    """Stands in for a lazy proxy such as Django's settings: any read evaluates it."""
+
+    reads = 0
+
+    def __getattr__(self, name):
+        Lazy.reads += 1
+        raise AttributeError(name)
+
+
+class WithLazyAttribute:
+    settings = Lazy()
+
+
+def test_keying_a_class_value_reads_none_of_its_attributes():
+    Lazy.reads = 0
+
+    def get(kind=WithLazyAttribute, instance=WithLazyAttribute()):
+        return kind
+
+    step(get)
+    unregister_steps(get)
+    assert Lazy.reads == 0
 
 
 def test_different_sentinels_in_one_module_are_distinct_steps():

@@ -106,7 +106,7 @@ def _layers(f: Callable[..., Any]) -> list[Any]:
     return layers
 
 
-def _function_key(f: Any) -> _Key:
+def _function_key(f: Any, active: frozenset[int]) -> _Key:
     code: CodeType = f.__code__
     # A pseudo-file such as "<string>" does not identify the source, so the module
     # tells apart code exec'd in different modules.
@@ -119,7 +119,7 @@ def _function_key(f: Any) -> _Key:
         except ValueError:
             cells.append(("<empty>",))
         else:
-            cells.append(_value_key(contents, f))
+            cells.append(_value_key(contents, active))
     return (
         code.co_filename,
         code.co_firstlineno,
@@ -127,59 +127,63 @@ def _function_key(f: Any) -> _Key:
         # Code compares by value, so different code at one location stays distinct.
         code,
         module,
-        tuple(_value_key(v, f) for v in getattr(f, "__defaults__", None) or ()),
-        tuple((name, _value_key(v, f)) for name, v in sorted(kwdefaults.items())),
+        tuple(_value_key(v, active) for v in getattr(f, "__defaults__", None) or ()),
+        tuple((name, _value_key(v, active)) for name, v in sorted(kwdefaults.items())),
         tuple(cells),
     )
 
 
-# Builtin types whose values compare equal across imports; any other value bound
-# to a module global is keyed by that global's name.
-_VALUE_TYPES = (type(None), bool, int, float, complex, str, bytes, tuple, frozenset, range)
+def _module_file(module: object) -> str | None:
+    """The real file of the imported module named ``module``, if there is one."""
+    file = getattr(sys.modules.get(module), "__file__", None) if isinstance(module, str) else None
+    return file if isinstance(file, str) and not file.startswith("<") else None
 
 
-def _source_file(value: Any, owner: Any) -> str | None:
-    """The file that defines the function or class ``value``, if it can be told."""
-    if isinstance(value, FunctionType):
-        return value.__code__.co_filename
-    for attribute in vars(value).values():
-        method = getattr(attribute, "__func__", attribute)
-        if isinstance(method, FunctionType) and method.__qualname__.startswith(
-            f"{value.__qualname__}."
-        ):
-            return method.__code__.co_filename
-    if value.__module__ == getattr(owner, "__module__", None):
-        return owner.__code__.co_filename
-    return getattr(sys.modules.get(value.__module__), "__file__", None)
+def _is_module_level(qualname: str) -> bool:
+    # A lambda or a function made inside another has no name of its own to go by.
+    return "<locals>" not in qualname and qualname.rpartition(".")[2] != "<lambda>"
 
 
-def _type_key(cls: type, owner: Any) -> Any:
-    return cls if cls.__module__ == "builtins" else _value_key(cls, owner)
+def _function_value_key(f: FunctionType, active: frozenset[int]) -> Any:
+    if _is_module_level(f.__qualname__):
+        file = _module_file(f.__module__) or f.__code__.co_filename
+        module = f.__module__ if file.startswith("<") else None
+        return ("<def>", file, f.__qualname__, module)
+    if id(f) in active:
+        # A function that captures itself, as a recursive closure does.
+        return ("<cycle>",)
+    return _function_key(f, active | {id(f)})
 
 
-def _value_key(value: Any, owner: Any) -> Any:
+def _class_key(cls: type) -> Any:
+    # Never by the class's attributes: generated methods have no useful file, and
+    # reading attributes can evaluate lazy objects.
+    if "<locals>" not in cls.__qualname__:
+        file = _module_file(cls.__module__)
+        if file is not None:
+            return ("<class>", file, cls.__qualname__)
+    return ("<id>", id(cls))
+
+
+def _value_key(value: Any, active: frozenset[int]) -> Any:
     """
-    Key a default or captured ``value`` of the function ``owner``.
+    Key a default or captured ``value`` of a step.
 
-    By value where possible, so a module imported twice gives equal keys.
+    By value where that is safe, so a module imported twice gives equal keys;
+    otherwise by identity. Telling two steps apart wrongly is loud (AmbiguousStep),
+    while merging them wrongly would silently pick one.
     """
     if ismethod(value):
-        return ("<method>", _value_key(value.__self__, owner), _value_key(value.__func__, owner))
-    if isinstance(value, (FunctionType, type)):
-        source = _source_file(value, owner)
-        if source is not None:
-            module = value.__module__ if source.startswith("<") else None
-            return ("<def>", source, value.__qualname__, module)
-    if not isinstance(value, _VALUE_TYPES):
-        # Sentinels and module-level instances compare by identity, so each import
-        # has its own; the global's name is the same in both.
-        for name, bound in getattr(owner, "__globals__", {}).items():
-            if bound is value:
-                return ("<global>", name)
-    kind = _type_key(type(value), owner)
+        return ("<method>", id(value.__self__), _value_key(value.__func__, active))
+    if isinstance(value, FunctionType):
+        return _function_value_key(value, active)
+    if isinstance(value, type):
+        return _class_key(value)
+    cls = type(value)
+    kind = cls if cls.__module__ == "builtins" else _class_key(cls)
     if isinstance(value, (tuple, frozenset)):
         # Element by element, so that (1,) and (1.0,) stay apart.
-        items = (_value_key(item, owner) for item in value)
+        items = (_value_key(item, active) for item in value)
         return (kind, tuple(items) if isinstance(value, tuple) else frozenset(items))
     if isinstance(value, float):
         # hex() tells apart 0.0 and -0.0, and makes NaN equal to itself.
@@ -198,7 +202,7 @@ def _layer_key(layer: Any) -> _Key:
         # A bound method forwards __code__, so methods of different instances share it.
         return ("<method>", id(layer.__self__), _layer_key(layer.__func__))
     if isinstance(getattr(layer, "__code__", None), CodeType):
-        return _function_key(layer)
+        return _function_key(layer, frozenset({id(layer)}))
     return ("<object>", id(layer))
 
 
