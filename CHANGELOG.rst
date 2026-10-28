@@ -5,6 +5,9 @@ safetydance Change Log
 v0.4.0
 ====================
 
+Releases before 0.4.0 (0.3.x and earlier) are not listed here except where
+noted below.
+
 A new API, incompatible with 0.3: steps are plain functions that share a
 context, and ``@script`` runs them in a fresh one. Functions are no longer
 rewritten.
@@ -19,6 +22,12 @@ rewritten.
   generator and ``async`` functions can be scripts, and concurrent asyncio
   tasks each see their own context. ``@test_context`` puts pytest fixtures in
   the context by name.
+* ``ContextProperty.has_value`` tells whether a read would produce a value.
+  ``NoActiveContext`` is raised outside any context, and ``ContextDataNotSet``
+  (a ``KeyError`` and an ``AttributeError``) for unset values, so ``hasattr``
+  and ``getattr`` with a default work.
+* A documentation site with a user guide and API reference, including a
+  migration guide from 0.3: https://dcharbon.gitlab.io/safetydance/migrating/
 * Python 3.14 support. Type hints are shipped (``py.typed``) and decorated
   scripts keep their signatures for type checkers.
 

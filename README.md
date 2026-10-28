@@ -2,7 +2,13 @@
 
 `safetydance` is a Python framework for defining type-safe and flexibly composable
 application steps with a shared execution context for sharing variables between the
-steps. The design of safetydance is partially inspired by `<https://cucumber.io>`_.
+steps. The design of safetydance is partially inspired by [Cucumber](https://cucumber.io).
+
+```bash
+pip install safetydance
+```
+
+Documentation: <https://dcharbon.gitlab.io/safetydance/>
 
 
 ## Description
@@ -59,6 +65,17 @@ def buy_breakfast() -> float:
 A default wrapped in `initializer(...)` is called with the context on first read, giving
 each context its own value; any other default is a constant. Decorated scripts keep
 their signatures for type checkers.
+
+In tests, `@test_context` works like `@script` and also puts the call's keyword
+arguments, such as pytest fixtures, into the context by name.
+
+## Migrating from 0.3
+
+0.4 is a new API, not compatible with 0.3: `@step` functions are plain functions,
+`step_data` and `ContextKey` became `ContextProperty` and `@context_data`, and
+nested scripts no longer share a context. See the
+[migration guide](https://dcharbon.gitlab.io/safetydance/migrating/), or pin
+`safetydance<0.4` until you can migrate.
 
 ### Context Scope Variables
 

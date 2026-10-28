@@ -9,8 +9,15 @@ project:
   # these carry the full GitLab Pages path.
   toc:
     - file: index.md
+    - file: installation.md
+    - file: concepts.md
+    - file: async-and-threads.md
+    - file: testing.md
+    - file: migrating.md
     - title: API reference
       url: /safetydance/api/
+    - title: Changelog
+      url: https://gitlab.com/dcharbon/safetydance/-/blob/main/CHANGELOG.rst
 site:
   template: book-theme
   options:

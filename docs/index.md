@@ -6,8 +6,15 @@ kernelspec:
 
 # safetydance
 
-Steps are plain functions that share data through an execution context; a
-**script** runs its steps in a fresh one.
+safetydance lets plain functions act as **steps** that share data through an
+execution context. A **script** runs its steps in a fresh context, so scripts
+never see each other's data, even when one calls another or they run
+concurrently. Write tests and flows that read like sentences, with typed shared
+state instead of passing arguments through every call.
+
+```bash
+pip install safetydance
+```
 
 ```{code-cell} python
 from safetydance import context_data, initializer, script
@@ -35,5 +42,9 @@ def buy_breakfast() -> float:
     return Shop.total
 
 
-buy_breakfast()
+assert buy_breakfast() == 6.0
 ```
+
+Next: [installation](installation.md), the [concepts](concepts.md),
+[async code and threads](async-and-threads.md), [testing](testing.md), and
+[migrating from 0.3](migrating.md).
