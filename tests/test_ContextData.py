@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import safetydance
 from safetydance import context, context_data
 
 
@@ -232,3 +233,43 @@ def test_nested_context_sharing():
     assert MultipleData.counter == 3
     assert MultipleData.name == "level_two"  # Unchanged by level_three
     assert MultipleData.data_dict["level"] == 3
+
+
+@context_data
+class Order:
+    total: float
+
+
+@context_data
+class Invoice:
+    total: float
+
+
+@context
+def test_same_field_name_in_different_classes_is_independent():
+    Order.total = 10.0
+    Invoice.total = 99.0
+    assert Order.total == 10.0
+    assert Invoice.total == 99.0
+
+
+@context
+def test_same_field_name_unset_in_other_class_is_not_found():
+    Order.total = 10.0
+    with pytest.raises(KeyError):
+        Invoice.total
+
+
+@context
+def test_not_found_error_names_declaring_class():
+    with pytest.raises(KeyError, match="Order"):
+        Order.total
+
+
+def test_fixture_binds_to_context_data_field_by_name():
+    @safetydance.test_context
+    def uses_fixture(total):
+        assert Order.total == total
+        assert Invoice.total == total
+
+    uses_fixture(total=5.0)

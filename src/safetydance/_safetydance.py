@@ -43,20 +43,21 @@ class ContextProperty(Generic[T]):
     def __setitem__(self, context: "Context", new_value: T):
         self._set(context, new_value, currentframe().f_back)
 
+    # Values are stored under the property itself, so same-named properties never
+    # collide. The name is only a read fallback, which lets values supplied by name
+    # (e.g. test fixtures via test_context) bind to the property.
     def _get(self, context: "Context", frame: FrameType) -> T:
-        value = context.get(self, None)
-        found = False
-        if value is None and self.name:
-            value = context.get(self.name, None)
-            found = self.name in context
-        else:
-            value = context.get(self, None)
-            found = self in context
-        if not found and self.initializer is not None:
+        found = True
+        if self in context:
+            value = context[self]
+        elif self.name and self.name in context:
+            value = context[self.name]
+        elif self.initializer is not None:
             value = self.initializer(context)
-            context[self.name or self] = value
+            context[self] = value
             context._trace(self, "initialized", frame)
-            found = True
+        else:
+            found = False
         context._trace(self, "retrieved", frame)
         if not found:
             raise KeyError(f"ContextData {self} not found in Context")
@@ -64,7 +65,7 @@ class ContextProperty(Generic[T]):
 
     def _set(self, context: "Context", new_value: T, frame: FrameType):
         context._trace(self, "set", frame)
-        context[self.name or self] = new_value
+        context[self] = new_value
 
     def __repr__(self) -> str:
         if self.name and self.declaring_cls:
@@ -254,11 +255,15 @@ class ContextData(type):
     def __new__(cls, name, bases, namespace):
         type_hints = namespace["__annotations__"]
         new_namespace = dict(namespace)
-        for name, type_hint in type_hints.items():
-            initializer = namespace.get(name, None)
-            context_data = ContextProperty[type_hint](name, initializer=initializer)
-            new_namespace[name] = ContextPropertyDescriptor(name, context_data)
+        context_datas = []
+        for field_name, type_hint in type_hints.items():
+            initializer = namespace.get(field_name, None)
+            context_data = ContextProperty[type_hint](field_name, initializer=initializer)
+            new_namespace[field_name] = ContextPropertyDescriptor(field_name, context_data)
+            context_datas.append(context_data)
         ret = super().__new__(cls, name, bases, new_namespace)
+        for context_data in context_datas:
+            context_data.declaring_cls = ret
         return ret
 
     def __setattr__(self, name, value):
