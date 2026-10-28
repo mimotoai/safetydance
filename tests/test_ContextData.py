@@ -405,3 +405,111 @@ def test_mutable_default_is_rejected():
         @context_data
         class Shared:
             items: list = []
+
+
+def test_classvar_is_not_a_field():
+    from typing import ClassVar
+
+    @context_data
+    class Constants:
+        VERSION: ClassVar[int] = 1
+        REGISTRY: ClassVar[dict] = {}
+        LABEL: "ClassVar[str]" = "x"
+        QUALIFIED: "typing.ClassVar[int]" = 2
+        real: int = 3
+
+    assert Constants.VERSION == 1
+    assert Constants.REGISTRY == {}
+    assert Constants.LABEL == "x"
+    assert Constants.QUALIFIED == 2
+
+    @context
+    def read():
+        return Constants.real
+
+    assert read() == 3
+
+
+def test_metaclass_accepts_class_keywords():
+    class Base:
+        def __init_subclass__(cls, tag=None, **kwargs):
+            super().__init_subclass__(**kwargs)
+            cls.tag = tag
+
+    class K(Base, metaclass=safetydance.ContextData, tag="x"):
+        value: int = 1
+
+    assert K.tag == "x"
+
+
+def test_super_in_decorated_method():
+    from functools import wraps
+
+    def logged(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    class Base:
+        @classmethod
+        def describe(cls):
+            return "base"
+
+    @context_data
+    class Child(Base):
+        value: int = 1
+
+        @classmethod
+        @logged
+        def describe(cls):
+            return "child+" + super().describe()
+
+        @logged
+        def instance(self):
+            return super().__repr__()
+
+    assert Child.describe() == "child+base"
+    assert "Child" in Child().instance()
+
+
+def test_super_in_partialmethod_and_cached_property():
+    from functools import cached_property, partialmethod
+
+    class Base:
+        def greet(self, punctuation):
+            return "hi" + punctuation
+
+    @context_data
+    class Child(Base):
+        value: int = 1
+
+        def greet(self, punctuation):
+            return super().greet(punctuation) + "!"
+
+        shout = partialmethod(greet, "?")
+
+        @cached_property
+        def name(self):
+            return super().greet("")
+
+    assert Child().shout() == "hi?!"
+    assert Child().name == "hi"
+
+
+def test_initializer_without_annotation_raises():
+    with pytest.raises(TypeError, match="cart"):
+
+        @context_data
+        class Missing:
+            cart = initializer(lambda ctx: [])
+
+
+@pytest.mark.parametrize("empty", [{}, set()])
+def test_mutable_dict_and_set_defaults_are_rejected(empty):
+    with pytest.raises(ValueError, match="field"):
+
+        @context_data
+        class Shared:
+            field: object = empty

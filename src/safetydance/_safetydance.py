@@ -2,11 +2,11 @@ import logging
 import sys
 from collections.abc import MutableMapping
 from contextvars import ContextVar, copy_context
-from functools import wraps
+from functools import cached_property, partialmethod, wraps
 from inspect import isasyncgenfunction, iscoroutinefunction, isgeneratorfunction
 from logging import Logger
 from types import FrameType
-from typing import Any, Callable, Generic, ParamSpec, TypeVar, overload
+from typing import Any, Callable, ClassVar, Generic, ParamSpec, TypeVar, get_origin, overload
 
 if sys.version_info >= (3, 14):
     from annotationlib import Format, get_annotations
@@ -439,12 +439,34 @@ def _initializer_for(field_name: str, default: Any) -> Callable[["Context"], Any
     return lambda ctx: default
 
 
+def _is_classvar(type_hint: Any) -> bool:
+    """Whether an annotation is ClassVar, as an object, a string or a ForwardRef."""
+    if type_hint is ClassVar or get_origin(type_hint) is ClassVar:
+        return True
+    text = type_hint if isinstance(type_hint, str) else getattr(type_hint, "__forward_arg__", None)
+    if text is None:
+        return False
+    text = text.strip()
+    return text.startswith(("ClassVar[", "typing.ClassVar[")) or text in (
+        "ClassVar",
+        "typing.ClassVar",
+    )
+
+
 class ContextData(type):
-    def __new__(cls, name, bases, namespace):
+    def __new__(mcls, name, bases, namespace, **kwds):
         # Annotations are read from the finished class: on 3.14+ the namespace holds
         # a lazy __annotate__ function rather than an __annotations__ dict.
-        ret = super().__new__(cls, name, bases, namespace)
-        for field_name, type_hint in _own_annotations(ret).items():
+        ret = super().__new__(mcls, name, bases, namespace, **kwds)
+        annotations = _own_annotations(ret)
+        for field_name, value in namespace.items():
+            if isinstance(value, _Initializer) and field_name not in annotations:
+                raise TypeError(
+                    f"initializer() default for {field_name!r} needs a type annotation"
+                )
+        for field_name, type_hint in annotations.items():
+            if _is_classvar(type_hint):
+                continue
             initializer = None
             default = namespace.get(field_name, _NO_DEFAULT)
             if isinstance(default, ContextPropertyDescriptor):
@@ -464,6 +486,9 @@ class ContextData(type):
                 ret, field_name, ContextPropertyDescriptor(field_name, context_data)
             )
         return ret
+
+    def __init__(cls, name, bases, namespace, **kwds):
+        super().__init__(name, bases, namespace)
 
     # Names resolve the way attribute lookup does, so fields inherited from a base class
     # are set (or unset) in the context rather than shadowed on the subclass. The
@@ -504,9 +529,14 @@ def _retarget_class_cells(old_cls: type, new_cls: type):
             funcs = [attr.__func__]
         elif isinstance(attr, property):
             funcs = [attr.fget, attr.fset, attr.fdel]
+        elif isinstance(attr, (partialmethod, cached_property)):
+            funcs = [attr.func]
         else:
             funcs = [attr]
         for func in funcs:
+            # Decorators built with functools.wraps hide the original behind __wrapped__.
+            while hasattr(func, "__wrapped__"):
+                func = func.__wrapped__
             code = getattr(func, "__code__", None)
             if code is None or "__class__" not in code.co_freevars:
                 continue
@@ -524,6 +554,9 @@ def context_data(cls: type[T]) -> type[T]:
 
     A default wrapped in initializer() is called with the Context on first read; any
     other default is a constant. Mutable defaults are rejected, as with dataclasses.
+
+    The decorator rebuilds the class, so a base class's __init_subclass__ runs again and
+    class keywords are not carried over; use metaclass=ContextData for those.
 
     Usage:
         @context_data
