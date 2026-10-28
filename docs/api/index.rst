@@ -47,4 +47,3 @@ Errors
 .. autoexception:: NoActiveContext
 .. autoexception:: ContextDataNotSet
 .. autoexception:: StepNotFound
-.. autoexception:: AmbiguousStep

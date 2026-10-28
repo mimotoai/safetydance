@@ -67,8 +67,8 @@ fails exactly as it would if called directly: reading a `@context_data` field
 raises `ContextDataNotSet`; writing one, or using `ContextProperty.value`,
 raises `NoActiveContext`.
 
-Mark a function with `@step` to make it findable. It returns the function
-unchanged, so you can still call it directly:
+Mark a function with `@step` to register it under its own name. It returns the
+function unchanged, so you can still call it directly:
 
 ```{code-cell} python
 from safetydance import Given, Then, When, context_data, step, test_context
@@ -104,18 +104,17 @@ def check_basket():
 check_basket()
 ```
 
-A step is found three ways. Use the shortest one that is not ambiguous:
+### Namespaces
 
-* the **full module path**, such as `Given.my_package.steps.get`, which never
-  clashes with another library's step. It is unique except for steps made by
-  one factory (closures) and bound methods, which need an explicit
-  registration or a short namespace;
-* a **short namespace**, if the steps module made its decorator with
-  `step_namespace`, such as `Given.http.get`;
-* the **bare name**, such as `Given.get`, when only one step has that name.
+A library should register its steps under a namespace, so that its names do not
+clash with anyone else's. `step_namespace("http")` makes a decorator that
+registers `get` as `Given.http.get`; a dotted namespace such as `"my.pkg"` gives
+`Given.my.pkg.get`. `register_steps(*fns, namespace=...)` does the same from the
+caller's side, for functions you did not decorate, and without a namespace it
+registers the bare names:
 
 ```{code-cell} python
-from safetydance import Given, step_namespace
+from safetydance import Given, register_steps, step_namespace
 
 greeting_step = step_namespace("greeting")
 
@@ -125,84 +124,91 @@ def says_hello(name):
     return f"hello {name}"
 
 
-assert Given.greeting.says_hello("Ada") == "hello Ada"
-assert Given.says_hello("Ada") == "hello Ada"
-```
-
-A bare name or short namespace that several different steps share raises
-`AmbiguousStep`, which lists every candidate's full module path. So does any
-name that is both a step and the start of another registered path, such as a
-module `login` with a step `login`. A short namespace makes `Given.greeting.x`
-reachable, but the bare `Given.x` stays ambiguous unless it is bound with
-`register_steps`.
-
-A step is identified by its definition location (file, line, qualified name
-and code), the location of each layer of its `functools.wraps` chain, and its
-default and captured values. Bound methods are identified by their instance.
-
-Values compare by value only when they are exactly `int`, `bool`, `float`,
-`complex`, `str`, `bytes` or `None`, or a tuple or frozenset of those, so `1`
-and `True`, or `(1,)` and `(1.0,)`, stay distinct. Every other value
-(functions, classes, instances, sentinels, `Decimal`, `Enum` members,
-partials) compares by object identity, and is never hashed, compared or
-inspected. That makes lazy objects, such as Django's `settings`, safe to use
-as defaults.
-
-So when a step module is imported twice, a step whose defaults or captured
-values include anything other than those builtins is a different step in each
-copy, and its bare name and short namespace path raise `AmbiguousStep`. Fix
-that by not importing the module twice (check pytest's rootdir and import
-mode), or by giving the copies distinct namespaces. Closures made by one
-factory that capture different values are distinct steps too, so their bare
-names and full paths are ambiguous: register them explicitly, or give each a
-short namespace. A registered step keeps its default and captured values alive
-until it is unregistered.
-
-Defining a step again at a different line, as reloading a module or re-running
-an edited notebook cell does, leaves the old one registered, so the name
-becomes ambiguous. Remove the old one first with `unregister_steps`, which
-drops a step from every path it is registered at (`@step` and
-`register_steps` alike) and ignores a step that is not registered:
-
-```python
-from safetydance import unregister_steps
-
-unregister_steps(old_says_hello)
-```
-
-`register_steps` settles a collision, and always beats a step registered with
-`@step`. Call it with the step you want, and the namespace to find it under (or
-none, for the bare name). The binding is global for the whole test run, and
-pytest imports every test module while collecting, so two test modules that
-bind different steps to one path fail with `ValueError` before any test runs.
-Make the bindings once, in `conftest.py` or one module that the tests share:
-
-```{code-cell} python
-from safetydance import Given, register_steps
-
-
 def pours():
     return "water"
 
 
 register_steps(pours, namespace="kettle")
+
+assert Given.greeting.says_hello("Ada") == "hello Ada"
 assert Given.kettle.pours() == "water"
+assert dir(Given.greeting) == ["says_hello"]
 ```
 
-`register_steps` raises `ValueError` when a different step is already bound at
-the path, when the path is already a namespace of other steps, or when it is
-under a path bound to a step. Every argument is checked first, so a failed call
-binds nothing. `register_steps()` with no steps raises `TypeError`.
+Each registration binds exactly one path, so `says_hello` above is not also
+`Given.says_hello`. The same function can be registered at several paths, for
+example by a library decorator and again by `register_steps` under your own
+namespace. Step names and namespace segments must be public identifiers: not a
+keyword, not starting with `_`, so `<lambda>` is rejected with `ValueError`.
+Something that is not callable, or has no `__name__`, raises `TypeError`, and so
+does calling `register_steps()` or `unregister_steps()` with no steps.
+`register_steps` is all or nothing: if any step is invalid or conflicts,
+nothing is bound.
 
-`@step` raises `ValueError` for a name that starts with `_`, is not an
-identifier, is a keyword or is `<lambda>`, and `TypeError` for something
-without a `__name__` and `__module__`. The same `ValueError` applies to names
-and namespace segments given to `step_namespace` and `register_steps`.
+### Conflicts
+
+Registering the same step again does nothing. Two registrations are the same
+step when they are the same object, or bound methods with the same instance and
+function (`obj.method` makes a new object on every access). Anything else is a
+different step, and nothing is ever replaced silently. These raise `ValueError`
+when you register, naming both steps as `module.qualname (file:line)`:
+
+* a different step at a path that is already bound;
+* a step at a path that is already a namespace of other steps;
+* a step under a path that is bound to a step.
+
+A bare-name clash between two libraries therefore surfaces at import, not in the
+middle of a test. Registering the same method of two instances says "a method of
+a different instance". The registry is global for the whole test run, so make
+bindings once, in `conftest.py` or a module the tests share.
+
+### Looking steps up
+
+Importing a module is what registers its steps, and nothing is loaded
+automatically. Import the modules whose steps a test uses, typically in
+`conftest.py`.
+
+A name nothing is registered at raises `StepNotFound`, whose message ends
+"import the module that defines it". It is an `AttributeError`, so `hasattr`
+and `getattr(Given, name, default)` treat it as absent. A path with registered
+children gives a namespace object; `dir(Given)` and `dir(Given.http)` list the
+registered child names. Names starting with `_` raise a plain `AttributeError`,
+which keeps tools that probe objects (pytest, `inspect.unwrap`, `copy`,
+`pickle`, Sphinx, `mock.patch.object`) harmless. `Given`, `When`, `Then` and
+`And` are one object, and `Given.x = ...` raises `AttributeError`.
+
+### Removing steps
+
+`unregister_steps(*steps)` removes every path each step is registered at, and
+namespaces left empty disappear. A step that is not registered is ignored. Use
+it before redefining a step in a notebook cell or after a reload:
+
+```{code-cell} python
+from safetydance import Given, step, unregister_steps
+
+
+@step
+def one_off_step():
+    return 1
+
+
+unregister_steps(Given.one_off_step)
+assert not hasattr(Given, "one_off_step")
+
+
+@step
+def one_off_step():
+    return 2
+
+
+assert Given.one_off_step() == 2
+```
 
 ### When a module is loaded twice
 
 Python treats each module name as a separate module, so a file that is
-reachable under two names, or executed twice, runs twice. Common triggers:
+reachable under two names, or executed twice, runs twice and registers its
+steps twice. Common triggers:
 
 * Two `sys.path` entries reach the same file. Under pytest's default
   `--import-mode=prepend`, a test directory without `__init__.py` is put on
@@ -219,15 +225,11 @@ reachable under two names, or executed twice, runs twice. Common triggers:
   runs it again.
 * Re-running code under the same name: `importlib.reload()`, or re-running a
   notebook cell. This is not strictly a double import, but it has the same
-  effect, and the colliding copies even share the full module path.
+  effect.
 
-Only steps whose defaults or captured values include non-builtin objects
-(functions, classes, sentinels, instances) are affected. Plain steps, and
-steps with only builtin values, are recognised as one step. An affected step
-raises `AmbiguousStep` on its bare name and its short namespace path. Each
-copy's full module path still resolves when the copies have different module
-names, except `__main__`, which cannot be typed; after a reload or a cell
-re-run the full path is shared, so it is ambiguous too.
+The second import raises `ValueError`, naming both module names ("the module
+was imported twice, as A and B"). A reload or a cell re-run raises too, without
+that hint, because both copies have the same module name.
 
 To avoid it:
 
@@ -236,57 +238,3 @@ To avoid it:
 * don't import from `conftest.py`;
 * keep runnable scripts separate from step modules;
 * before a reload or a cell re-run, `unregister_steps` the old steps.
-
-### Importing step modules
-
-A step exists once its module has been imported. Either import the step
-modules a test uses, or have the library expose them through a
-`safetydance.steps` entry point. The entry point's name is only a label; it
-should match the namespace the module registers, and its value is the module:
-
-```toml
-[project.entry-points."safetydance.steps"]
-http = "my_package.steps"
-```
-
-The first lookup that does not start with `_` imports every installed
-`safetydance.steps` entry point, so what a lookup returns never depends on the
-order of lookups. A successfully loaded entry point is not loaded again.
-
-If an entry point fails to import, the error reaches the caller from the
-lookup, including a `hasattr(Given, ...)` miss, and the steps it had
-registered are rolled back: the registrations made by modules whose import
-failed are removed, and those made by modules that did import are kept, as
-those modules are not imported again. The next lookup tries the entry point again
-and raises again until it is fixed, so one broken plugin's `ImportError`
-surfaces from every lookup. An `AttributeError` raised while importing is
-re-raised as `ImportError` naming the entry point, so `hasattr` and
-`getattr(Given, name, default)` do not hide it.
-
-### Errors, names and introspection
-
-`StepNotFound` and `AmbiguousStep` are sibling `AttributeError`s, neither a
-kind of the other. `except StepNotFound` does not catch ambiguity, and
-`hasattr` and `getattr(Given, name, default)` treat both as absent.
-
-Lookups of names starting with `_` on `Given` raise a plain `AttributeError`.
-Below the root, a single-underscore segment is reachable, so a module
-`pkg._impl.steps` works as `Given.pkg._impl.steps.get`; dunder segments are
-not. A module run as `__main__` (a script, or a notebook) therefore has no
-reachable full path: its steps are found by bare name or a short namespace.
-
-`dir(Given)` and `dir(Given.http)` list only the names already registered, so
-before the first lookup they list only steps from modules already imported.
-Entry points load on the first lookup, not on `dir()`.
-
-Error messages suggest a full module path only when every segment can be typed
-as an attribute, so a module named `my-steps` or `pkg.class.steps`, or one run
-as `__main__`, is advised a short namespace or `register_steps` instead.
-
-`Given`, `When`, `Then` and `And` are one object, and `Given.x = ...` raises
-`AttributeError`.
-
-```{note}
-Rollback is not atomic across threads: if another thread registers the very
-same step at the moment a load fails, the rollback can remove it.
-```

@@ -70,9 +70,9 @@ and need neither `safetydance-test` nor `type_extensions`:
 | --- | --- |
 | `from safetydance_test import Given, When, Then, And` | `from safetydance import Given, When, Then, And` |
 | `@scripted_test` | `@test_context`, which puts pytest fixtures into the context by name |
-| `step_extension(f, target_type=X)` | `@step` or `step_namespace("x")` in the step module |
-| `all_steps_as_step_extensions_from(module)` | `@step` on the module's steps, or `register_steps(*fns, namespace=...)` |
+| `step_extension(f, target_type=X)` | `step_namespace("x")` |
+| plain `step_extension` / `all_steps_as_step_extensions_from(module)` | `@step` on each step, or `register_steps(*fns)` |
 | `type_extensions.extension_property` sub-prefixes (`Given.http`) | `step_namespace("http")` |
-| `TestStepPrefix` | `StepPrefix` (no subclassing needed) |
+| `TestStepPrefix` | not needed |
 
 See [testing](testing.md#given-when-then) for how steps are found.
