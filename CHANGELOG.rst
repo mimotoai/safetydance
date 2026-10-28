@@ -19,8 +19,12 @@ v0.5.0
   order. A loaded entry point is not loaded again; a failed one is retried on
   later lookups, with its partial registrations rolled back, and an
   ``AttributeError`` raised while importing it becomes an ``ImportError``
-  naming it. One broken plugin's ``ImportError`` surfaces from lookups until
-  it is fixed.
+  naming it. Only registrations made by modules whose import failed are rolled
+  back. One broken plugin's ``ImportError`` surfaces from lookups until it is
+  fixed.
+* A step's identity covers its definition location, wrapper chain and default
+  and captured values, compared so that a module imported twice is one step.
+  Error messages suggest a full module path only when it can be typed.
 * ``StepNotFound`` and ``AmbiguousStep`` are sibling ``AttributeError`` s
   (neither is a kind of the other) that report a missing name or one that could
   mean several steps; ``hasattr`` and ``getattr(..., default)`` treat both as
@@ -29,7 +33,8 @@ v0.5.0
   the root. The root rejects ``_`` names and dunder segments are unreachable,
   so steps in a script run as ``__main__`` are found by bare name or short
   namespace.
-* ``dir(Given)`` lists only registered names and loads nothing. Attributes
+* ``dir(Given)`` lists only registered names and loads nothing, so before the
+  first lookup it shows only steps from modules already imported. Attributes
   cannot be set on ``Given``.
 
 **Changed:**

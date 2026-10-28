@@ -139,12 +139,20 @@ reachable, but the bare `Given.x` stays ambiguous unless it is bound with
 A step is identified by where it is defined, so loading one module under two
 names is still one step. For a function that is its definition location (file,
 line and qualified name) and code, its wrapper chain (each `functools.wraps`
-layer counts) and its default values. Closures are identified by their code
-and captured values, bound methods by their instance, and other callables
-(classes, instances) by object identity. Closures made by one factory that
-capture different values are distinct steps, so their bare names and full
-paths are ambiguous: register them explicitly, or give each a short
-namespace.
+layer counts) and its default and captured values. Closures are identified by
+their code and captured values, bound methods by their instance, and other
+callables (classes, instances) by object identity.
+
+Default and captured values are compared so that a module imported twice
+still gives one step. Classes and functions are compared by where they are
+defined, and a value bound to a module global (a sentinel, a module-level
+instance) by that global's name. Everything else compares by value, and equal
+values of different types, such as `1` and `True` or `(1,)` and `(1.0,)`, stay
+distinct. A value that matches none of these falls back to object identity;
+an enum member from a module imported twice is an example, so a step with
+one as a default is ambiguous with its double. Closures made by one factory
+that capture different values are distinct steps, so their bare names and full
+paths are ambiguous: register them explicitly, or give each a short namespace.
 
 Defining a step again at a different line, as reloading a module or re-running
 an edited notebook cell does, leaves the old one registered, so the name
@@ -205,8 +213,9 @@ order of lookups. A successfully loaded entry point is not loaded again.
 
 If an entry point fails to import, the error reaches the caller from the
 lookup, including a `hasattr(Given, ...)` miss, and the steps it had
-registered are rolled back (steps of modules that did import stay, as those
-modules are not imported again). The next lookup tries the entry point again
+registered are rolled back: the registrations made by modules whose import
+failed are removed, and those made by modules that did import are kept, as
+those modules are not imported again. The next lookup tries the entry point again
 and raises again until it is fixed, so one broken plugin's `ImportError`
 surfaces from every lookup. An `AttributeError` raised while importing is
 re-raised as `ImportError` naming the entry point, so `hasattr` and
@@ -224,8 +233,18 @@ Below the root, a single-underscore segment is reachable, so a module
 not. A module run as `__main__` (a script, or a notebook) therefore has no
 reachable full path: its steps are found by bare name or a short namespace.
 
-`dir(Given)` and `dir(Given.http)` list only the names already registered; they
-do not load entry points.
+`dir(Given)` and `dir(Given.http)` list only the names already registered, so
+before the first lookup they list only steps from modules already imported.
+Entry points load on the first lookup, not on `dir()`.
+
+Error messages suggest a full module path only when every segment can be typed
+as an attribute, so a module named `my-steps` or `pkg.class.steps`, or one run
+as `__main__`, is advised a short namespace or `register_steps` instead.
 
 `Given`, `When`, `Then` and `And` are one object, and `Given.x = ...` raises
 `AttributeError`.
+
+```{note}
+Rollback is not atomic across threads: if another thread registers the very
+same step at the moment a load fails, the rollback can remove it.
+```
