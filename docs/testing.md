@@ -204,6 +204,18 @@ def one_off_step():
 assert Given.one_off_step() == 2
 ```
 
+The same-step rule applies to Python functions and methods. A builtin bound
+method such as `lst.append` is a new object on each access, so register it
+once, or wrap it in a function.
+
+### Mocking
+
+The registry holds the original function, so `mock.patch("pkg.steps.get")` does
+not change what `Given.get` calls. Patch what the step calls instead, or
+`unregister_steps` the step and register the replacement.
+`mock.patch.object(Given, ...)` raises `AttributeError`, because the prefixes
+have no attributes of their own.
+
 ### When a module is loaded twice
 
 Python treats each module name as a separate module, so a file that is
@@ -238,3 +250,12 @@ To avoid it:
 * don't import from `conftest.py`;
 * keep runnable scripts separate from step modules;
 * before a reload or a cell re-run, `unregister_steps` the old steps.
+
+### Testing step libraries
+
+In-process `pytester` runs (`runpytest_inprocess()`, and `runpytest()` by
+default) share the registry of the process they run in. A `@step` in a
+`conftest.py` passes on the first run, and the second run fails with "ImportError
+while loading conftest" wrapping the conflict `ValueError`. Use
+`pytester.runpytest_subprocess()`, or call `unregister_steps(...)` on those steps
+in a fixture teardown.
