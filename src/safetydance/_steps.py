@@ -10,8 +10,10 @@ __all__ = [
     "StepPrefix",
     "Then",
     "When",
+    "register_steps",
     "step",
     "step_namespace",
+    "unregister_steps",
 ]
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -259,6 +261,39 @@ def step_namespace(namespace: str) -> Callable[[F], F]:
         return f
 
     return decorator
+
+
+def register_steps(*steps: Callable[..., object], namespace: str | None = None) -> None:
+    """
+    Register each of ``steps`` under its own name, optionally inside ``namespace``.
+
+    ``register_steps(f)`` makes ``Given.f``, and ``register_steps(f, namespace="a.b")``
+    makes ``Given.a.b.f``. A step already registered elsewhere is also reachable at
+    the new path. Registration is all or nothing: if any step is invalid or
+    conflicts, nothing is bound. Registering the same step again does nothing; a
+    different step at a taken path raises ``ValueError``. Bound methods are the
+    same step when they share ``__self__`` and ``__func__``. Raises ``TypeError``
+    if called with no steps, or if a step is not callable or has no ``__name__``.
+    """
+    if not steps:
+        raise TypeError("register_steps() needs at least one step")
+    prefix: _Path = ()
+    if namespace is not None:
+        prefix = tuple(_segment(part, "namespace segment") for part in namespace.split("."))
+    _registry.bind([((*prefix, _step_name(f)), f) for f in steps])
+
+
+def unregister_steps(*steps: Callable[..., object]) -> None:
+    """
+    Remove every path at which each of ``steps`` is registered.
+
+    Namespaces left empty disappear. A step that is not registered is ignored, and
+    a bound method matches by ``__self__`` and ``__func__``. Raises ``TypeError``
+    if called with no steps.
+    """
+    if not steps:
+        raise TypeError("unregister_steps() needs at least one step")
+    _registry.unbind(steps)
 
 
 Given = When = Then = And = StepPrefix()

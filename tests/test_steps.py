@@ -1,7 +1,11 @@
 import copy
 import functools
 import inspect
+import importlib
+import importlib.util
 import pickle
+import sys
+import threading
 
 import pytest
 
@@ -15,9 +19,11 @@ from safetydance import (
     Then,
     When,
     _steps,
+    register_steps,
     script,
     step,
     step_namespace,
+    unregister_steps,
 )
 
 
@@ -188,3 +194,154 @@ def test_no_frame_inspection_or_entry_points():
     source = inspect.getsource(_steps)
     for banned in ("_getframe", "currentframe", "entry_points"):
         assert banned not in source
+
+
+def test_register_steps_binds_bare_or_namespaced():
+    f, g = make_step("m", "get"), make_step("m", "put")
+    register_steps(f)
+    register_steps(g, namespace="x")
+    assert Given.get is f
+    assert Given.x.put is g
+
+
+def test_register_steps_rehomes_a_decorated_step():
+    f = step_namespace("http")(make_step("m", "get"))
+    register_steps(f, namespace="api")
+    assert Given.http.get is f
+    assert Given.api.get is f
+
+
+def test_register_steps_is_all_or_nothing():
+    f = make_step("m", "get")
+    with pytest.raises(TypeError):
+        register_steps(f, 1)
+    with pytest.raises(StepNotFound):
+        Given.get
+    step(make_step("other", "put"))
+    with pytest.raises(ValueError):
+        register_steps(f, make_step("m", "put"))
+    with pytest.raises(StepNotFound):
+        Given.get
+
+
+def test_register_steps_conflicting_items_in_one_call():
+    with pytest.raises(ValueError):
+        register_steps(make_step("a", "get"), make_step("b", "get"))
+    assert dir(Given) == []
+
+
+def test_empty_calls_raise():
+    with pytest.raises(TypeError):
+        register_steps()
+    with pytest.raises(TypeError):
+        unregister_steps()
+
+
+class Pinger:
+    def ping(self):
+        return "pong"
+
+
+def test_bound_method_registered_twice_is_a_no_op():
+    c = Pinger()
+    register_steps(c.ping)
+    register_steps(c.ping)
+    assert Given.ping() == "pong"
+
+
+def test_bound_methods_of_two_instances_conflict():
+    register_steps(Pinger().ping)
+    with pytest.raises(ValueError):
+        register_steps(Pinger().ping)
+
+
+def test_unregister_frees_every_path():
+    f = make_step("m", "get")
+    register_steps(f)
+    register_steps(f, namespace="http")
+    register_steps(f, namespace="api")
+    unregister_steps(f)
+    with pytest.raises(StepNotFound):
+        Given.get
+    with pytest.raises(StepNotFound):
+        Given.http
+    with pytest.raises(StepNotFound):
+        Given.api
+    assert "http" not in dir(Given)
+    register_steps(f, namespace="http")
+    assert Given.http.get is f
+
+
+def test_unregister_unknown_step_is_a_no_op():
+    unregister_steps(make_step("m", "get"))
+
+
+def test_unregister_via_lookup_after_reload(tmp_path, monkeypatch):
+    (tmp_path / "sd_reload_mod.py").write_text("from safetydance import step\n\n@step\ndef go(): pass\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "sd_reload_mod", raising=False)
+    module = importlib.import_module("sd_reload_mod")
+    try:
+        with pytest.raises(ValueError) as info:
+            importlib.reload(module)
+        assert "imported twice" not in str(info.value)
+        unregister_steps(Given.go)
+        module = importlib.reload(module)
+        assert Given.go is module.go
+    finally:
+        sys.modules.pop("sd_reload_mod", None)
+
+
+def test_double_import_raises_with_a_hint(tmp_path, monkeypatch):
+    path = tmp_path / "steps.py"
+    path.write_text("from safetydance import step\n\n@step\ndef go(): pass\n")
+
+    def load(name):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, module)
+        spec.loader.exec_module(module)
+
+    load("pkgx.steps")
+    with pytest.raises(ValueError, match=r"imported twice, as pkgx\.steps and tests_copy\.pkgx\.steps"):
+        load("tests_copy.pkgx.steps")
+
+
+def _run_threads(targets):
+    barrier = threading.Barrier(len(targets), timeout=5)
+    errors = []
+
+    def run(target):
+        barrier.wait()
+        try:
+            target()
+        except ValueError as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(t,), daemon=True) for t in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive()
+    return errors
+
+
+def test_concurrent_registration():
+    def worker(i):
+        return lambda: [
+            register_steps(make_step(f"m{i}", f"s{n}"), namespace=f"ns{i}") for n in range(50)
+        ]
+
+    assert _run_threads([worker(i) for i in range(8)]) == []
+    assert all(
+        getattr(getattr(Given, f"ns{i}"), f"s{n}")() is None
+        for i in range(8)
+        for n in range(50)
+    )
+
+
+def test_concurrent_conflicts_are_detected_exactly_once():
+    targets = [lambda i=i: register_steps(make_step(f"m{i}", "same")) for i in range(8)]
+    assert len(_run_threads(targets)) == 7
+    assert callable(Given.same)
