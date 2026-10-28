@@ -321,16 +321,20 @@ class _Registry:
         if namespace is not None:
             paths.append((*namespace, name))
         importer = self._importer() or f.__module__
-        # Keys hold only builtins, code objects and _Refs, so comparing them under
-        # _lock runs no user __eq__ or __hash__.
+        # Defaults and captured values are keyed as builtins or _Refs, so comparing
+        # keys under _lock runs none of their __eq__ or __hash__; names such as
+        # __qualname__ are used as given.
         with self._lock:
             for path in paths:
                 registered = self._default.setdefault(path, {})
                 # The same object under an older key (a default or captured value
                 # rebound since) is one step, not two.
-                for stale in [k for k, g in registered.items() if g is f and k != key]:
-                    del registered[stale]
-                if key not in registered:
+                stale = [k for k, g in registered.items() if g is f and k != key]
+                for old in stale:
+                    del registered[old]
+                # A replaced entry was registered before, so a failed load that
+                # replaces it must not roll it back; the explicit tier does the same.
+                if key not in registered and not stale:
                     self._record("default", path, key, importer)
                 # The same step registered again replaces the stored object.
                 registered[key] = f
@@ -364,15 +368,18 @@ class _Registry:
                     f"{where}: '{_dotted(path[:i])}' is already registered to "
                     f"{_full_name(bound[1])}."
                 )
-        first = self._explicit.get(path) or items[0]
+        existing = self._explicit.get(path)
+        # Every step must be the same as the one already bound and the one that will
+        # be bound, by key or, though a rebound value changed its key, as an object.
+        bindings = [existing, items[-1]] if existing is not None else [items[-1]]
         for key, f in items:
-            # The same object is the same step, though a rebound value changed its key.
-            if key != first[0] and f is not first[1]:
-                raise ValueError(
-                    f"'{_dotted(path)}' is already registered to "
-                    f"{_full_name(first[1])}; cannot also register "
-                    f"{_full_name(f)} there."
-                )
+            for other_key, other in bindings:
+                if key != other_key and f is not other:
+                    raise ValueError(
+                        f"'{_dotted(path)}' is already registered to "
+                        f"{_full_name(other)}; cannot also register "
+                        f"{_full_name(f)} there."
+                    )
 
     def remove(self, steps: tuple[Callable[..., object], ...]) -> None:
         keys = {_step_key(f) for f in steps}
@@ -679,10 +686,10 @@ def unregister_steps(*steps: Callable[..., object]) -> None:
     module path, short namespaces and explicit bindings. A registration goes when
     it is the same step as one given, in the sense that ``step`` describes, or is
     the very object given, even if its defaults or captured values have changed
-    since. A step that is not registered is ignored. Raises ``TypeError`` for something that is
-    not callable; every argument is checked first, so a failed call removes
-    nothing. Raises ``TypeError`` when no step is given, as ``register_steps``
-    does.
+    since. A step that is not registered is ignored. Raises ``TypeError`` for
+    something that is not callable; every argument is checked first, so a failed
+    call removes nothing. Raises ``TypeError`` when no step is given, as
+    ``register_steps`` does.
     """
     if not steps:
         raise TypeError("unregister_steps() needs at least one step.")

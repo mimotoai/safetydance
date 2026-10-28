@@ -648,3 +648,33 @@ def test_registration_outside_a_load_walks_no_frames(monkeypatch):
     register_steps(ping, namespace="bound")
     assert Given.plain.ping() == "plain"
     assert Given.bound.ping() == "plain"
+
+
+def test_failed_load_keeps_a_step_registered_before_it(installed):
+    # A failing module re-registers a step registered before the load, whose
+    # captured value it rebinds first; the rollback must not remove that step.
+    def factory():
+        box = object()
+
+        def get():
+            return box
+
+        def rebind():
+            nonlocal box
+            box = object()
+
+        return get, rebind
+
+    get, rebind = factory()
+
+    def load():
+        namespace = {"__name__": "sd_ep_rebinder", "get": get, "rebind": rebind, "step": step}
+        exec("rebind()\nstep(get)\nraise RuntimeError('boom')\n", namespace)
+
+    installed.entry_points[:] = [FakeEntryPoint("rebinder", load)]
+    step(get)
+    with pytest.raises(RuntimeError, match="boom"):
+        Given.get
+    _, default, _ = registry_state()
+    assert [g for g in default[("get",)].values()] == [get]
+    assert any(g is get for g in default[tuple(get.__module__.split(".")) + ("get",)].values())

@@ -1382,8 +1382,8 @@ class Box:
     """A weak-referenceable object for identity-keyed values."""
 
 
-def make_rebindable():
-    box = Box()
+def make_rebindable(box=None):
+    box = Box() if box is None else box
 
     def get():
         return box
@@ -1515,3 +1515,40 @@ def test_identity_keyed_wrapped_layer_stays_alive_while_registered():
     unregister_steps(fetcher)
     gc.collect()
     assert inner() is None
+
+
+@pytest.mark.parametrize("order", ["mutated first", "stale match first"])
+def test_register_steps_rejects_a_different_step_matching_a_stale_key(order):
+    get, rebind = make_rebindable()
+    register_steps(get, namespace="y")
+    stale_box = get.__closure__[0].cell_contents
+    old_key = _steps._step_key(get)
+    rebind()
+    # Same code capturing get's old object: equal to get's old key only.
+    other = make_rebindable(stale_box)[0]
+    assert _steps._step_key(other) == old_key != _steps._step_key(get)
+    steps = [get, other] if order == "mutated first" else [other, get]
+    with pytest.raises(ValueError, match="already registered"):
+        register_steps(*steps, namespace="y")
+    assert Given.y.get is get
+
+
+class Pinger:
+    def ping(self):
+        return "ping"
+
+
+def test_identity_keyed_bound_method_self_stays_alive_while_registered():
+    def ping():
+        return "wrapper"
+
+    ping.__wrapped__ = Pinger().ping
+    instance = weakref.ref(ping.__wrapped__.__self__)
+    step(ping)
+    # Only the key refers to the instance once __wrapped__ moves on.
+    ping.__wrapped__ = None
+    gc.collect()
+    assert instance() is not None
+    unregister_steps(ping)
+    gc.collect()
+    assert instance() is None
